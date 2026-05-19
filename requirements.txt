@@ -1,3 +1,2 @@
 numpy==2.4.6
-python-usbtmc==0.8
-pyusb==1.3.1
+pyserial==3.5

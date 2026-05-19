@@ -1,34 +1,37 @@
 # LCR Logger
 
-Stream and log measurements from a [B&K Precision 894 / 895 LCR meter](https://www.bkprecision.com/products/component-testers/894) over USBTMC. Supports continuous streaming at a fixed frequency and logarithmic frequency sweeps.
+Stream and log measurements from a [B&K Precision 894 / 895 LCR meter](https://www.bkprecision.com/products/component-testers/894) over a serial connection. Supports continuous streaming at a fixed frequency and logarithmic frequency sweeps.
+
+The meter is talked to over a serial port (USB Virtual COM, RS-232, or a USB-to-serial adapter), which uses only stock OS drivers — no admin rights or driver replacement (Zadig / libusb) required. The meter's USBTMC interface is also supported by the SCPI command set, but is not used by this script.
 
 ## Hardware
 
 - B&K Precision **894** (20 Hz – 500 kHz) or **895** (20 Hz – 1 MHz)
-- USB cable from the meter to the host PC
+- One of:
+  - USB cable to the meter (meter's USB mode must be set to **USBCDC / Virtual COM** in the System / Setup menu — *not* USBTMC)
+  - Null-modem RS-232 cable (pins 2/3 swapped — see manual p.6 for pinout)
+  - USB-to-RS232 adapter + null-modem cable
 
 ## Setup
 
-### 1. Driver / permissions
+### 1. Configure the meter
 
-**Windows.** The vendor driver claims the device by default and blocks `pyusb` from seeing it. Install [Zadig](https://zadig.akeo.ie/), select the BK 894 from the dropdown, and replace its driver with **WinUSB** (or libusb-win32). Change the driver for the meter only — do not touch anything else in the dropdown.
+Front panel → System / Setup → Interface:
 
-**Linux.** Add a udev rule once, then replug the meter:
+- Set USB mode to **USBCDC** (also called "Virtual COM"). If you only see USBTMC, check the manual for the exact menu path — the option is there on stock firmware.
+- Note the **baud rate** (default 9600). Whatever the meter is set to, you'll pass the same value via `--baud`.
+
+### 2. Find your serial port
 
 ```sh
-echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="XXXX", MODE="0666"' \
-    | sudo tee /etc/udev/rules.d/99-bk894.rules
-sudo udevadm control --reload-rules
+python LCR_logging.py --list-ports
 ```
 
-Replace `XXXX` with your VID (no `0x` prefix).
+Or look it up manually:
 
-### 2. Find your VID/PID and set them in the script
-
-- **Windows:** Device Manager → meter → Properties → Details → "Hardware Ids". The `VID_xxxx` and `PID_yyyy` fields are what you want.
-- **Linux:** `lsusb` — look for an entry like `ID 1ab1:0588 B&K Precision`.
-
-Edit the `VID` and `PID` constants at the top of [`LCR_logging.py`](LCR_logging.py).
+- **Windows:** Device Manager → Ports (COM & LPT) → look for the new COMx after plugging the meter in.
+- **Linux:** `/dev/ttyACM0` for USB-CDC, `/dev/ttyUSB0` for USB-to-serial adapters.
+- **macOS:** `/dev/cu.usbmodem*` or `/dev/cu.usbserial-*`.
 
 ### 3. Python environment
 
@@ -49,9 +52,11 @@ pip install -r requirements.txt
 ## Usage
 
 ```sh
-python LCR_logging.py                  # stream at the default 1 kHz
-python LCR_logging.py --freq 10000     # stream at 10 kHz
-python LCR_logging.py --sweep          # log-sweep 20 Hz → 200 kHz, then prompt to save
+python LCR_logging.py --port COM3                       # stream at the default 1 kHz
+python LCR_logging.py --port COM3 --freq 10000          # stream at 10 kHz
+python LCR_logging.py --port COM3 --baud 115200         # higher baud (must match meter)
+python LCR_logging.py --port COM3 --sweep               # log-sweep 20 Hz -> 200 kHz, then prompt to save
+python LCR_logging.py --list-ports                      # list available serial ports
 ```
 
 Press `Ctrl+C` to stop streaming. After a sweep finishes, the script asks for a filename; results are written to `data/` (a `.txt` extension is appended if you don't provide one). Press Enter without a name to skip saving.
@@ -66,6 +71,7 @@ See the docstring at the top of [`LCR_logging.py`](LCR_logging.py) for full deta
 - `*TRG` only works when the meter's trigger source is `BUS`. The script does not currently send `TRIG:SOUR BUS`; if the meter is in `INTernal` trigger mode (the factory default), `*TRG` may be ignored and `FETCH?` will return the most recent free-running result.
 - The `FETCH?` response is parsed as `<primary>, <secondary>, <status>`. When the comparator is enabled the meter also returns a `<bin number>` field, which is silently dropped.
 - Status byte values per the manual: `00` = normal, `-1` = no data in buffer, `+1` = analog unbalance, `+2` = A/D not working, `+3` = signal source overload, `+4` = constant voltage can't be adjusted. The script does not flag non-zero statuses — inspect the raw output.
+- Neither RS-232 nor USB-CDC supports hardware flow control on this meter (manual p.7). The script adds a small post-write delay (`CMD_DELAY_S`) to keep the meter's input buffer from overrunning; if you see intermittent communication errors, raise it.
 
 The full SCPI reference is in `894_895_programming_manual.pdf`.
 

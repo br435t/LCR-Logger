@@ -1,35 +1,40 @@
 """
-LCR_logging.py -- Stream live LCR measurements from a BK Precision 894 over USBTMC.
+LCR_logging.py -- Stream live LCR measurements from a BK Precision 894/895
+over a serial port (USB Virtual COM, RS-232, or USB-to-serial adapter).
 
-HOW TO FIND YOUR VID/PID:
-    Linux:   Run `lsusb` with the meter plugged in. Look for an entry like
-             "ID 1ab1:0588 B&K Precision". Use those hex values below.
-    Windows: Open Device Manager, find the meter (after the driver swap
-             below it will appear under "libusb-win32 devices" or "Universal
-             Serial Bus devices"), right-click -> Properties -> Details ->
-             "Hardware Ids". The VID_xxxx and PID_yyyy fields are what you
-             want.
+WHY SERIAL INSTEAD OF USBTMC:
+    The meter's USBTMC interface needs the WinUSB / libusb-win32 driver
+    swap (via Zadig) on Windows, which requires admin rights. The serial
+    interfaces below use only stock OS drivers, so no admin is needed.
+
+INTERFACE OPTIONS:
+    1. USB Virtual COM (USBCDC) -- on the meter, set the USB interface
+       mode to "USBCDC" / "Virtual COM" in the System / Setup menu. Plug
+       the meter in; Windows or Linux enumerates it as a standard COM
+       port using the built-in CDC driver.
+    2. RS-232 -- null-modem cable, pins 2/3 swapped. See the programming
+       manual p.6 for the pinout. A USB-to-RS232 adapter also works.
+    3. LAN -- not supported by this script. If you need LAN, talk to the
+       meter via TCP on port 5025; the SCPI commands are identical.
+
+FIND YOUR PORT:
+    Windows: Device Manager -> Ports (COM & LPT). Note the COMx number.
+    Linux:   /dev/ttyACM0 (USB-CDC) or /dev/ttyUSB0 (USB-serial).
+    macOS:   /dev/cu.usbmodem* or /dev/cu.usbserial-*.
+    Or run:  python LCR_logging.py --list-ports
+
+SERIAL SETTINGS (must match the meter's front-panel setting):
+    Baud:   9600 (default), 19200, 28800, 38400, 48000, 57600, or 115200.
+    Frame:  8 data bits, 1 stop bit, no parity, no flow control.
 
 INSTALL DEPENDENCIES:
-    pip install python-usbtmc pyusb
-
-DRIVER / PERMISSIONS (do this once, then replug the meter):
-    Linux:
-        echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="XXXX", MODE="0666"' \
-            | sudo tee /etc/udev/rules.d/99-bk894.rules
-        sudo udevadm control --reload-rules
-        Replace XXXX with your actual VID (no 0x prefix).
-    Windows:
-        BK Precision's vendor driver claims the device by default, which
-        blocks pyusb from seeing it. Install Zadig (https://zadig.akeo.ie/),
-        select the BK894 from the dropdown, and replace its driver with
-        WinUSB (or libusb-win32). Change the driver for the meter only --
-        do not touch anything else in the dropdown.
+    pip install -r requirements.txt
 
 USAGE:
-    python LCR_logging.py              # stream at default freq
-    python LCR_logging.py --freq 1000  # stream at 1 kHz
-    python LCR_logging.py --sweep      # sweep 20 Hz to 200 kHz
+    python LCR_logging.py --port COM3                # stream at default 1 kHz
+    python LCR_logging.py --port COM3 --freq 1000    # stream at 1 kHz
+    python LCR_logging.py --port COM3 --sweep        # log-sweep 20 Hz -> 200 kHz
+    python LCR_logging.py --list-ports               # list available ports
 
 LOGGING:
     All log messages (INFO and above) are written to LCR_logging.log
@@ -43,19 +48,14 @@ LOGGING:
 
 import argparse
 import logging
-import sys
 import time
 from pathlib import Path
 
 import numpy as np
-import usb.core
-import usbtmc
+import serial
+import serial.tools.list_ports
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-
-# TODO: Replace with values from `lsusb` output.
-VID = 0x0471
-PID = 0x2827
 
 # Sweep results are written here, relative to the working directory.
 # The folder is created automatically if it does not exist.
@@ -70,6 +70,16 @@ MEAS_SETTLE_S = 0.4
 
 # Continuous-stream poll interval (seconds).
 STREAM_INTERVAL_S = 0.5
+
+# Per-command delay. Manual p.7: the meter has no hardware flow control on
+# either RS-232 or USB-CDC, so back-to-back commands can overrun its input
+# buffer. A small sleep after each write prevents that.
+CMD_DELAY_S = 0.05
+
+# Default serial settings. The baud rate must match what is configured on
+# the meter's front panel (System -> Interface).
+DEFAULT_BAUD = 9600
+SERIAL_TIMEOUT_S = 2.0
 
 # Log file written to the working directory.
 LOG_FILE = "LCR_logging.log"
@@ -103,82 +113,110 @@ _setup_logging()
 log = logging.getLogger(__name__)
 
 
+# ── Serial helpers ────────────────────────────────────────────────────────────
+
+def scpi_write(ser: serial.Serial, cmd: str) -> None:
+    """
+    Send a SCPI command, terminated with a newline.
+
+    Why the sleep:
+        Manual p.7 -- neither RS-232 nor USB-CDC supports hardware flow
+        control on this meter, so the host can outpace the meter's input
+        parser. A short delay after every write prevents buffer overruns.
+    """
+    ser.write(cmd.encode("ascii") + b"\n")
+    ser.flush()
+    time.sleep(CMD_DELAY_S)
+
+
+def scpi_query(ser: serial.Serial, cmd: str) -> str:
+    """Send a SCPI query and return the response, stripped of whitespace."""
+    scpi_write(ser, cmd)
+    line = ser.read_until(b"\n")
+    return line.decode("ascii", errors="replace").strip()
+
+
+def list_serial_ports() -> None:
+    """Print every serial port the OS currently knows about."""
+    ports = list(serial.tools.list_ports.comports())
+    if not ports:
+        print("No serial ports found.")
+        return
+    for p in ports:
+        line = f"{p.device}  --  {p.description}"
+        if p.hwid and p.hwid != "n/a":
+            line += f"  [{p.hwid}]"
+        print(line)
+
+
+# ── Instrument open ───────────────────────────────────────────────────────────
+
+def open_instrument(
+    port: str,
+    baud: int = DEFAULT_BAUD,
+    timeout_s: float = SERIAL_TIMEOUT_S,
+) -> serial.Serial:
+    """
+    Open the serial port to the LCR meter and verify communication with *IDN?.
+    """
+    ser = serial.Serial(
+        port=port,
+        baudrate=baud,
+        bytesize=serial.EIGHTBITS,
+        parity=serial.PARITY_NONE,
+        stopbits=serial.STOPBITS_ONE,
+        timeout=timeout_s,
+        write_timeout=timeout_s,
+    )
+    # Drop any stale bytes from a previous session.
+    time.sleep(0.2)
+    ser.reset_input_buffer()
+    ser.reset_output_buffer()
+
+    scpi_write(ser, "*CLS")
+    time.sleep(0.3)
+    idn = scpi_query(ser, "*IDN?")
+    if not idn:
+        ser.close()
+        raise RuntimeError(
+            f"No response from meter on {port}. Check the baud rate, the "
+            "cable, and that the meter's USB mode is set to USBCDC (not "
+            "USBTMC) on the front panel."
+        )
+    log.info("Connected to: %s", idn)
+    return ser
+
+
 # ── Low-level helpers ─────────────────────────────────────────────────────────
 
-def reset_usb_pipe(vid: int, pid: int) -> None:
-    """
-    Clear USB halt conditions on the bulk IN/OUT endpoints.
-
-    Why this matters:
-        If a previous session crashed mid-transfer, the USB endpoints can be
-        left in a "halted" state. The host and device then disagree on state,
-        causing every subsequent read/write to fail silently or raise an error.
-        Clearing the halt is like pressing "reset" on the pipe -- both sides
-        agree to start fresh.
-    """
-    dev = usb.core.find(idVendor=vid, idProduct=pid)
-    if not isinstance(dev, usb.core.Device):
-        raise RuntimeError(
-            f"USB device {vid:#06x}:{pid:#06x} not found. "
-            "Check cable and VID/PID values."
-        )
-    try:
-        # Kernel-driver detach is a Linux concept. On Windows the driver
-        # (WinUSB/libusb-win32 installed via Zadig) already exposes the
-        # device to libusb directly, so there is nothing to detach.
-        if sys.platform.startswith("linux"):
-            if dev.is_kernel_driver_active(0):
-                dev.detach_kernel_driver(0)
-                log.debug("Detached kernel driver from interface 0.")
-        dev.clear_halt(0x81)  # Bulk IN  endpoint
-        dev.clear_halt(0x02)  # Bulk OUT endpoint
-        log.debug("USB endpoints cleared.")
-    except Exception as exc:
-        log.warning("USB pipe reset warning (may be safe to ignore): %s", exc)
-
-
-def open_instrument(vid: int, pid: int, timeout_s: float = 10.0) -> usbtmc.Instrument:
-    """
-    Open the USBTMC instrument and verify communication with *IDN?.
-
-    Returns:
-        usbtmc.Instrument -- ready for SCPI commands.
-    """
-    reset_usb_pipe(vid, pid)
-    instr = usbtmc.Instrument(vid, pid)
-    instr.timeout = timeout_s
-    instr.write("SYST:REM")
-    time.sleep(0.2)
-    instr.write("*CLS")
-    time.sleep(0.5)
-    idn = instr.ask("*IDN?").strip() # type: ignore
-    log.info("Connected to: %s", idn)
-    return instr
-
-
-def fetch_measurement(instr: usbtmc.Instrument) -> str:
+def fetch_measurement(ser: serial.Serial) -> str:
     """
     Trigger a single measurement and return the raw SCPI response string.
 
-    Why split write/read instead of ask():
-        ask() immediately reads after writing. If the meter is still
-        integrating (especially at low frequencies), you get the previous
-        result. The explicit *TRG + sleep + FETCH? pattern ensures you wait
-        for the new measurement to complete.
+    Pattern: *TRG triggers a measurement and pushes the result to the output
+    buffer (manual p.9); MEAS_SETTLE_S lets the meter finish integrating --
+    especially important at low frequencies -- and FETCH? then queries the
+    most recent buffered result.
+
+    Note: *TRG only fires when the meter's trigger source is BUS. If it is
+    left at the factory default of TRIG:SOUR INTernal, *TRG is ignored and
+    FETCH? returns whatever the free-running measurement loop produced last.
 
     Returns:
-        Raw comma-separated string, e.g. "1.234E+03,5.678E-02,0"
-        Fields: [primary value, secondary value, status byte]
+        Raw comma-separated string, e.g. "1.234E+03,5.678E-02,0".
+        Fields: <primary>, <secondary>, <status>.
+        Manual p.31: <status> is "00" for a good reading; -1, +1..+4 flag
+        various error conditions. If the comparator is enabled, a fourth
+        <bin number> field is also appended; this script ignores it.
     """
-    instr.write("*TRG")
+    scpi_write(ser, "*TRG")
     time.sleep(MEAS_SETTLE_S)
-    instr.write("FETCH?")
-    return instr.read().strip()
+    return scpi_query(ser, "FETCH?")
 
 
-def set_frequency(instr: usbtmc.Instrument, freq_hz: float) -> None:
+def set_frequency(ser: serial.Serial, freq_hz: float) -> None:
     """Set the test frequency and wait for relay settling."""
-    instr.write(f":FREQ {freq_hz:.2f}")
+    scpi_write(ser, f":FREQ {freq_hz:.2f}")
     log.debug(
         "Frequency set to %.2f Hz -- waiting %.1fs for relay settle.",
         freq_hz,
@@ -240,21 +278,21 @@ def prompt_and_save(rows: list[tuple[float, str]]) -> None:
 
 # ── Modes ─────────────────────────────────────────────────────────────────────
 
-def stream_continuous(instr: usbtmc.Instrument, freq_hz: float) -> None:
+def stream_continuous(ser: serial.Serial, freq_hz: float) -> None:
     """
     Poll the instrument continuously at a fixed frequency.
     Press Ctrl+C to stop.
     """
-    set_frequency(instr, freq_hz)
+    set_frequency(ser, freq_hz)
     log.info("Streaming at %.2f Hz. Press Ctrl+C to stop.", freq_hz)
 
     while True:
-        data = fetch_measurement(instr)
+        data = fetch_measurement(ser)
         print(f"  {data}")
         time.sleep(STREAM_INTERVAL_S)
 
 
-def run_sweep(instr: usbtmc.Instrument) -> None:
+def run_sweep(ser: serial.Serial) -> None:
     """
     Logarithmic frequency sweep from 20 Hz to 200 kHz (20 points).
     Prints each step to the console, then prompts to save results.
@@ -268,8 +306,8 @@ def run_sweep(instr: usbtmc.Instrument) -> None:
     rows: list[tuple[float, str]] = []
 
     for freq in freqs:
-        set_frequency(instr, freq)
-        data = fetch_measurement(instr)
+        set_frequency(ser, freq)
+        data = fetch_measurement(ser)
         rows.append((freq, data))
         print(f"  {freq:14.2f}  {data}")
 
@@ -280,7 +318,19 @@ def run_sweep(instr: usbtmc.Instrument) -> None:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="BK 894 LCR meter USBTMC streamer.")
+    parser = argparse.ArgumentParser(description="BK 894/895 LCR meter SCPI streamer.")
+    parser.add_argument(
+        "--port",
+        help="Serial port (e.g. COM3 on Windows, /dev/ttyACM0 on Linux). "
+             "Required unless --list-ports is given.",
+    )
+    parser.add_argument(
+        "--baud",
+        type=int,
+        default=DEFAULT_BAUD,
+        help=f"Baud rate (default: {DEFAULT_BAUD}). Must match the meter's "
+             "front-panel setting.",
+    )
     parser.add_argument(
         "--freq",
         type=float,
@@ -292,35 +342,41 @@ def main() -> None:
         action="store_true",
         help="Run a logarithmic frequency sweep instead of streaming.",
     )
+    parser.add_argument(
+        "--list-ports",
+        action="store_true",
+        help="List available serial ports and exit.",
+    )
     args = parser.parse_args()
 
-    if VID == 0 or PID == 0:
-        log.error(
-            "VID and PID are not set. Run `lsusb` to find your device IDs "
-            "and update the VID/PID constants at the top of this file."
-        )
+    if args.list_ports:
+        list_serial_ports()
         return
 
-    instr = None
+    if not args.port:
+        parser.error("--port is required (use --list-ports to discover one)")
+
+    if args.freq <= 0:
+        parser.error(f"--freq must be positive, got {args.freq}")
+
+    ser = None
     try:
-        instr = open_instrument(VID, PID)
+        ser = open_instrument(args.port, baud=args.baud)
 
         if args.sweep:
-            run_sweep(instr)
+            run_sweep(ser)
         else:
-            stream_continuous(instr, args.freq)
+            stream_continuous(ser, args.freq)
 
     except KeyboardInterrupt:
         log.info("Stopped by user.")
     except Exception as exc:
         log.error("Fatal error: %s", exc)
-        log.info("TIP: Toggle the [LOCAL] button on the meter to reset remote state.")
     finally:
-        if instr:
+        if ser is not None and ser.is_open:
             try:
-                instr.write("SYST:LOC")
-                instr.close()
-                log.debug("Instrument closed.")
+                ser.close()
+                log.debug("Serial port closed.")
             except Exception:
                 pass
 
