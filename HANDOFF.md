@@ -52,13 +52,14 @@ GitHub: `https://github.com/bnt1002/LCR-Logger` (private).
 
 Branches:
 
-- `main` — has `LCR_logging.py` (USBTMC version, **stale**), `requirements.txt` (with numpy added).
-- `Windows` — has the manual PDF and pre-bug-fix work. Currently in working-tree limbo: serial-refactored `LCR_logging.py`, updated `requirements.txt` (pyserial), updated `README.md`, and this `HANDOFF.md` are all **uncommitted**.
+- `main` — USBTMC version of `LCR_logging.py`, **stale**. Dead code at this point.
+- `Windows` — pre-bug-fix snapshot. Has the manual PDF and the older USBTMC script. Superseded by `driver-change-windows`.
+- `driver-change-windows` — **current working branch.** Holds the serial refactor (`faf1546`) and this handoff doc (`6f6cab2`). Working tree is clean and pushed to origin.
 
-If you continue this work, you almost certainly want to:
+If you continue this work:
 
-1. Commit the serial refactor on `Windows`.
-2. Decide whether `main` should catch up — either merge `Windows → main`, or rebuild `main` to be the serial version directly. The USBTMC version on `main` is dead code at this point.
+1. Fold `driver-change-windows` into `main` (merge or rebuild — the USBTMC version on `main` has no value to preserve).
+2. Retire `Windows` once `main` is current — its only unique content was the PDF, which is already on `driver-change-windows`.
 
 ## Things explicitly *not* done
 
