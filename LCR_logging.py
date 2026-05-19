@@ -2,18 +2,29 @@
 LCR_logging.py -- Stream live LCR measurements from a BK Precision 894 over USBTMC.
 
 HOW TO FIND YOUR VID/PID:
-    Run `lsusb` with the meter plugged in.
-    Look for a new entry -- e.g., "ID 1ab1:0588 B&K Precision"
-    Set VID and PID below to those hex values.
+    Linux:   Run `lsusb` with the meter plugged in. Look for an entry like
+             "ID 1ab1:0588 B&K Precision". Use those hex values below.
+    Windows: Open Device Manager, find the meter (after the driver swap
+             below it will appear under "libusb-win32 devices" or "Universal
+             Serial Bus devices"), right-click -> Properties -> Details ->
+             "Hardware Ids". The VID_xxxx and PID_yyyy fields are what you
+             want.
 
 INSTALL DEPENDENCIES:
     pip install python-usbtmc pyusb
 
-UDEV RULE (run once, then replug the meter):
-    echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="XXXX", MODE="0666"' \
-        | sudo tee /etc/udev/rules.d/99-bk894.rules
-    sudo udevadm control --reload-rules
-    Replace XXXX with your actual VID (no 0x prefix).
+DRIVER / PERMISSIONS (do this once, then replug the meter):
+    Linux:
+        echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="XXXX", MODE="0666"' \
+            | sudo tee /etc/udev/rules.d/99-bk894.rules
+        sudo udevadm control --reload-rules
+        Replace XXXX with your actual VID (no 0x prefix).
+    Windows:
+        BK Precision's vendor driver claims the device by default, which
+        blocks pyusb from seeing it. Install Zadig (https://zadig.akeo.ie/),
+        select the BK894 from the dropdown, and replace its driver with
+        WinUSB (or libusb-win32). Change the driver for the meter only --
+        do not touch anything else in the dropdown.
 
 USAGE:
     python LCR_logging.py              # stream at default freq
@@ -32,6 +43,7 @@ LOGGING:
 
 import argparse
 import logging
+import sys
 import time
 from pathlib import Path
 
@@ -105,15 +117,19 @@ def reset_usb_pipe(vid: int, pid: int) -> None:
         agree to start fresh.
     """
     dev = usb.core.find(idVendor=vid, idProduct=pid)
-    if dev is None:
+    if not isinstance(dev, usb.core.Device):
         raise RuntimeError(
             f"USB device {vid:#06x}:{pid:#06x} not found. "
             "Check cable and VID/PID values."
         )
     try:
-        if dev.is_kernel_driver_active(0):
-            dev.detach_kernel_driver(0)
-            log.debug("Detached kernel driver from interface 0.")
+        # Kernel-driver detach is a Linux concept. On Windows the driver
+        # (WinUSB/libusb-win32 installed via Zadig) already exposes the
+        # device to libusb directly, so there is nothing to detach.
+        if sys.platform.startswith("linux"):
+            if dev.is_kernel_driver_active(0):
+                dev.detach_kernel_driver(0)
+                log.debug("Detached kernel driver from interface 0.")
         dev.clear_halt(0x81)  # Bulk IN  endpoint
         dev.clear_halt(0x02)  # Bulk OUT endpoint
         log.debug("USB endpoints cleared.")
@@ -135,7 +151,7 @@ def open_instrument(vid: int, pid: int, timeout_s: float = 10.0) -> usbtmc.Instr
     time.sleep(0.2)
     instr.write("*CLS")
     time.sleep(0.5)
-    idn = instr.ask("*IDN?").strip()
+    idn = instr.ask("*IDN?").strip() # type: ignore
     log.info("Connected to: %s", idn)
     return instr
 
