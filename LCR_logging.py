@@ -240,7 +240,7 @@ def stream_continuous(instr: usbtmc.Instrument, freq_hz: float) -> None:
 
 def run_sweep(instr: usbtmc.Instrument) -> None:
     """
-    Logarithmic frequency sweep from 20 Hz to 200 kHz (50 points).
+    Logarithmic frequency sweep from 20 Hz to 200 kHz (20 points).
     Prints each step to the console, then prompts to save results.
     """
     freqs = np.logspace(np.log10(20), np.log10(200_000), num=20)
