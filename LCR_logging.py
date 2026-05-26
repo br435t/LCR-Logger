@@ -7,15 +7,25 @@ WHY SERIAL INSTEAD OF USBTMC:
     swap (via Zadig) on Windows, which requires admin rights. The serial
     interfaces below use only stock OS drivers, so no admin is needed.
 
-INTERFACE OPTIONS:
-    1. USB Virtual COM (USBCDC) -- on the meter, set the USB interface
-       mode to "USBCDC" / "Virtual COM" in the System / Setup menu. Plug
-       the meter in; Windows or Linux enumerates it as a standard COM
-       port using the built-in CDC driver.
-    2. RS-232 -- null-modem cable, pins 2/3 swapped. See the programming
-       manual p.6 for the pinout. A USB-to-RS232 adapter also works.
-    3. LAN -- not supported by this script. If you need LAN, talk to the
-       meter via TCP on port 5025; the SCPI commands are identical.
+INTERFACE OPTIONS (the meter only listens on ONE interface at a time --
+the front-panel System / Setup / Interface setting must match the
+transport you're actually using):
+    1. USB Virtual COM (USBCDC) -- on the meter, set Interface to
+       "USBCDC" / "Virtual COM". Plug the meter in; Windows or Linux
+       enumerates it as a standard COM port using the built-in CDC
+       driver.
+    2. RS-232 -- on the meter, set Interface to "RS-232C". Connect a
+       null-modem cable (pins 2/3 swapped -- see programming manual
+       p.6) to either a PC RS-232 port or a USB-to-RS232 adapter.
+    3. LAN -- not supported by this script. If you need LAN, talk to
+       the meter via TCP on port 5025; the SCPI commands are identical.
+
+FRONT-PANEL STATE:
+    Before running, exit any menus so the meter is back on its main
+    measurement screen showing live readings. *TRG and FETCH? only
+    return data while the measurement loop is running on the front
+    panel -- if the meter is parked in System / Setup or any other
+    menu, FETCH? comes back empty and streaming prints blank lines.
 
 FIND YOUR PORT:
     Windows: Device Manager -> Ports (COM & LPT). Note the COMx number.
@@ -174,6 +184,11 @@ def open_instrument(
     ser.reset_output_buffer()
 
     scpi_write(ser, "*CLS")
+    # *TRG (used by fetch_measurement) only fires when the trigger source
+    # is BUS. The factory default is INTernal, in which case *TRG is
+    # ignored and FETCH? returns the free-running result instead of a
+    # freshly triggered one.
+    scpi_write(ser, "TRIG:SOUR BUS")
     time.sleep(0.3)
     idn = scpi_query(ser, "*IDN?")
     if not idn:
@@ -198,9 +213,10 @@ def fetch_measurement(ser: serial.Serial) -> str:
     especially important at low frequencies -- and FETCH? then queries the
     most recent buffered result.
 
-    Note: *TRG only fires when the meter's trigger source is BUS. If it is
-    left at the factory default of TRIG:SOUR INTernal, *TRG is ignored and
-    FETCH? returns whatever the free-running measurement loop produced last.
+    Note: *TRG only fires when the meter's trigger source is BUS. The
+    factory default is INTernal, so open_instrument sends TRIG:SOUR BUS
+    at startup -- if that ever stops happening, *TRG will be silently
+    ignored and FETCH? will return the free-running measurement instead.
 
     Returns:
         Raw comma-separated string, e.g. "1.234E+03,5.678E-02,0".

@@ -16,10 +16,14 @@ The meter is talked to over a serial port (USB Virtual COM, RS-232, or a USB-to-
 
 ### 1. Configure the meter
 
-Front panel → System / Setup → Interface:
+Front panel → System / Setup → Interface. The meter only listens on one interface at a time, so pick the one matching your cable:
 
-- Set USB mode to **USBCDC** (also called "Virtual COM"). If you only see USBTMC, check the manual for the exact menu path — the option is there on stock firmware.
-- Note the **baud rate** (default 9600). Whatever the meter is set to, you'll pass the same value via `--baud`.
+- **Direct USB cable** → set Interface to **USBCDC** (a.k.a. "Virtual COM"). If you only see USBTMC, check the manual for the exact menu path — the option is there on stock firmware.
+- **USB-to-RS232 adapter (or PC RS-232 port)** → set Interface to **RS-232C**.
+
+Also note the **baud rate** (default 9600). Whatever the meter is set to, you'll pass the same value via `--baud`.
+
+Before running the script, **exit any menus** so the meter is back on its main measurement screen showing live readings. `*TRG` and `FETCH?` only return data while the measurement loop is running on the front panel — if the meter is parked in System/Setup or any other menu, `FETCH?` comes back empty and the script prints blank lines.
 
 ### 2. Find your serial port
 
@@ -68,7 +72,7 @@ All console output is also appended to `LCR_logging.log` in the working director
 See the docstring at the top of [`LCR_logging.py`](LCR_logging.py) for full details. Highlights:
 
 - The measurement function (Cp-D, Ls-Q, R-X, etc.) is **not** set by the script — it uses whatever mode the meter was last in. Set it on the front panel before starting, or add a `FUNC:IMP <mode>` write to `open_instrument`.
-- `*TRG` only works when the meter's trigger source is `BUS`. The script does not currently send `TRIG:SOUR BUS`; if the meter is in `INTernal` trigger mode (the factory default), `*TRG` may be ignored and `FETCH?` will return the most recent free-running result.
+- `*TRG` only works when the meter's trigger source is `BUS`. The script sends `TRIG:SOUR BUS` during `open_instrument` so this is handled at startup; if you ever bypass that path, freshly triggered reads will silently fall back to the free-running result.
 - The `FETCH?` response is parsed as `<primary>, <secondary>, <status>`. When the comparator is enabled the meter also returns a `<bin number>` field, which is silently dropped.
 - Status byte values per the manual: `00` = normal, `-1` = no data in buffer, `+1` = analog unbalance, `+2` = A/D not working, `+3` = signal source overload, `+4` = constant voltage can't be adjusted. The script does not flag non-zero statuses — inspect the raw output.
 - Neither RS-232 nor USB-CDC supports hardware flow control on this meter (manual p.7). The script adds a small post-write delay (`CMD_DELAY_S`) to keep the meter's input buffer from overrunning; if you see intermittent communication errors, raise it.

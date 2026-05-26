@@ -39,7 +39,7 @@ Documented in the docstring at the top of `LCR_logging.py` and in `README.md`. R
 
 | # | Issue | Severity |
 |---|-------|----------|
-| 1 | `*TRG` requires `TRIG:SOUR BUS`. The script never sets this, so on a factory-default meter (`TRIG:SOUR INTernal`), `*TRG` may be ignored and `FETCH?` returns the free-running result instead of a freshly triggered one. | **Likely real bug** |
+| 1 | ~~`*TRG` requires `TRIG:SOUR BUS`. The script never sets this...~~ **Fixed:** `open_instrument` now sends `TRIG:SOUR BUS` at startup. | Resolved |
 | 2 | Measurement function (Cp-D, Ls-Q, R-X, etc.) is never set. The meter uses whatever mode was last selected on the front panel. Non-deterministic across runs. | Design gap |
 | 3 | `FETCH?` parsing assumes 3 fields. With comparator on, the meter appends a 4th `<bin number>` field that's silently dropped. | Minor |
 | 4 | Status byte not decoded. Manual p.31: `00`=normal, `-1`=no data, `+1..+4`=various errors. Script prints the raw value without flagging non-zero. | Minor |
@@ -52,14 +52,11 @@ GitHub: `https://github.com/bnt1002/LCR-Logger` (private).
 
 Branches:
 
-- `main` — USBTMC version of `LCR_logging.py`, **stale**. Dead code at this point.
-- `Windows` — pre-bug-fix snapshot. Has the manual PDF and the older USBTMC script. Superseded by `driver-change-windows`.
-- `driver-change-windows` — **current working branch.** Holds the serial refactor (`faf1546`) and this handoff doc (`6f6cab2`). Working tree is clean and pushed to origin.
+- `main` — **current working branch.** Holds the serial refactor, this handoff doc, and (as of the latest pass) the `TRIG:SOUR BUS` fix and the RS-232C / USBCDC interface-selection docs.
+- `driver-change-windows` — superseded snapshot from before the work was folded into `main`. Safe to delete locally and on origin once you're confident nothing on it is needed.
+- `Windows` — already gone.
 
-If you continue this work:
-
-1. Fold `driver-change-windows` into `main` (merge or rebuild — the USBTMC version on `main` has no value to preserve).
-2. Retire `Windows` once `main` is current — its only unique content was the PDF, which is already on `driver-change-windows`.
+If you continue this work, `git checkout main` and go. No more branch juggling required.
 
 ## Things explicitly *not* done
 
