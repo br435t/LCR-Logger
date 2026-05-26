@@ -10,7 +10,7 @@ The meter is talked to over a serial port (USB Virtual COM, RS-232, or a USB-to-
 - One of:
   - USB cable to the meter (meter's USB mode must be set to **USBCDC / Virtual COM** in the System / Setup menu — *not* USBTMC)
   - Null-modem RS-232 cable (pins 2/3 swapped — see manual p.6 for pinout)
-  - USB-to-RS232 adapter + null-modem cable
+  - USB-to-RS232 adapter + null-modem cable. Tested working: [FTDI USB-to-RS232 adapter (FT232R)](https://www.amazon.com/dp/B0BKJKYCJK).
 
 ## Setup
 
