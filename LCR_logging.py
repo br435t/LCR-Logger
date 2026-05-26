@@ -51,12 +51,15 @@ LOGGING:
     in the working directory in addition to the console.
 
     After a sweep completes, you will be prompted to enter a filename.
-    The sweep results are saved into the data/ subfolder of the working
-    directory. The folder is created automatically if it does not exist.
-    Press Enter without typing a name to skip saving.
+    Two files are written into the data/ subfolder using that name as a
+    stem: a human-readable .txt and a .csv for analysis. Any extension
+    you type is ignored -- both formats are always produced. The folder
+    is created automatically if it does not exist. Press Enter without
+    typing a name to skip saving.
 """
 
 import argparse
+import csv
 import logging
 import time
 from pathlib import Path
@@ -252,10 +255,11 @@ def prompt_and_save(rows: list[tuple[float, str]]) -> None:
               during the sweep.
 
     Behaviour:
-        - If the user enters a name, the file is written to DATA_DIR and the
-          full path is logged.
+        - If the user enters a name, two files are written under DATA_DIR
+          sharing the same stem: a human-readable .txt and a .csv for
+          downstream analysis. Any extension the user types is ignored --
+          both formats are always produced.
         - If the user presses Enter without typing a name, saving is skipped.
-        - A .txt extension is appended automatically if none is provided.
         - DATA_DIR is created automatically if it does not already exist.
     """
     print()
@@ -265,31 +269,42 @@ def prompt_and_save(rows: list[tuple[float, str]]) -> None:
         log.info("Save skipped -- no filename entered.")
         return
 
-    # Resolve path into the data folder, appending .txt if no extension given.
-    stem = Path(name)
-    if not stem.suffix:
-        stem = stem.with_suffix(".txt")
-
+    # Strip whatever extension the user typed; we always write both .txt and .csv.
+    bare = Path(name).with_suffix("")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    path = DATA_DIR / stem
+    txt_path = DATA_DIR / bare.with_suffix(".txt")
+    csv_path = DATA_DIR / bare.with_suffix(".csv")
 
+    # Parse once so both writers see the same fields.
+    parsed: list[tuple[float, str, str, str]] = []
+    for freq, data in rows:
+        parts     = data.split(",")
+        primary   = parts[0].strip() if len(parts) > 0 else "?"
+        secondary = parts[1].strip() if len(parts) > 1 else "?"
+        status    = parts[2].strip() if len(parts) > 2 else "?"
+        parsed.append((freq, primary, secondary, status))
+
+    # Human-readable text file.
     header  = f"{'Freq (Hz)':>14}  {'Primary':>16}  {'Secondary':>16}  {'Status':>8}\n"
     divider = "-" * 60 + "\n"
-
-    with path.open("w", encoding="utf-8") as f:
+    with txt_path.open("w", encoding="utf-8") as f:
         f.write("BK Precision 894 -- Frequency Sweep Results\n")
         f.write(divider)
         f.write(header)
         f.write(divider)
-
-        for freq, data in rows:
-            parts     = data.split(",")
-            primary   = parts[0].strip() if len(parts) > 0 else "?"
-            secondary = parts[1].strip() if len(parts) > 1 else "?"
-            status    = parts[2].strip() if len(parts) > 2 else "?"
+        for freq, primary, secondary, status in parsed:
             f.write(f"  {freq:14.2f}  {primary:>16}  {secondary:>16}  {status:>8}\n")
 
-    log.info("Sweep results saved to: %s", path.resolve())
+    # CSV for downstream analysis. newline="" lets the csv module pick its own
+    # line ending and avoids the blank-line-between-rows quirk on Windows.
+    with csv_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Freq (Hz)", "Primary", "Secondary", "Status"])
+        for freq, primary, secondary, status in parsed:
+            writer.writerow([f"{freq:.2f}", primary, secondary, status])
+
+    log.info("Sweep results saved to: %s", txt_path.resolve())
+    log.info("Sweep results saved to: %s", csv_path.resolve())
 
 
 # ── Modes ─────────────────────────────────────────────────────────────────────

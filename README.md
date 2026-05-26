@@ -63,7 +63,7 @@ python LCR_logging.py --port COM3 --sweep               # log-sweep 20 Hz -> 200
 python LCR_logging.py --list-ports                      # list available serial ports
 ```
 
-Press `Ctrl+C` to stop streaming. After a sweep finishes, the script asks for a filename; results are written to `data/` (a `.txt` extension is appended if you don't provide one). Press Enter without a name to skip saving.
+Press `Ctrl+C` to stop streaming. After a sweep finishes, the script asks for a filename; results are written to `data/` as two files sharing the same stem — a human-readable `.txt` and a `.csv` for analysis. Any extension you type is ignored. Press Enter without a name to skip saving.
 
 All console output is also appended to `LCR_logging.log` in the working directory.
 
