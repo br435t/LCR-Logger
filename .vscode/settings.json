@@ -1,3 +1,6 @@
 {
-    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe"
+    // No interpreter path is pinned here on purpose. The Python extension
+    // auto-detects the workspace .venv per-OS (.venv/bin/python on
+    // Linux/macOS, .venv\Scripts\python.exe on Windows), so this stays
+    // cross-platform. Pinning a single path would break the other OS.
 }

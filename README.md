@@ -55,13 +55,19 @@ pip install -r requirements.txt
 
 ## Usage
 
+Use a `/dev/...` path on Linux/macOS and a `COMx` name on Windows. The examples below show Linux's `/dev/ttyACM0` (direct USB); substitute your own port from `--list-ports`.
+
 ```sh
-python LCR_logging.py --port COM3                       # stream at the default 1 kHz
-python LCR_logging.py --port COM3 --freq 10000          # stream at 10 kHz
-python LCR_logging.py --port COM3 --baud 115200         # higher baud (must match meter)
-python LCR_logging.py --port COM3 --sweep               # log-sweep 20 Hz -> 200 kHz, then prompt to save
+python LCR_logging.py --port /dev/ttyACM0               # stream at the default 1 kHz (Linux direct USB)
+python LCR_logging.py --port /dev/ttyUSB0               # Linux USB-to-RS232 adapter
+python LCR_logging.py --port COM3                       # Windows
+python LCR_logging.py --port /dev/ttyACM0 --freq 10000  # stream at 10 kHz
+python LCR_logging.py --port /dev/ttyACM0 --baud 115200 # higher baud (must match meter)
+python LCR_logging.py --port /dev/ttyACM0 --sweep       # log-sweep 20 Hz -> 200 kHz, then prompt to save
 python LCR_logging.py --list-ports                      # list available serial ports
 ```
+
+> **Linux permissions:** serial ports are owned by the `dialout` group. If you get `Permission denied` opening the port, add yourself once with `sudo usermod -aG dialout $USER`, then log out and back in (or run `newgrp dialout` in the current terminal).
 
 Press `Ctrl+C` to stop streaming. After a sweep finishes, the script asks for a filename; results are written to `data/` as two files sharing the same stem — a human-readable `.txt` and a `.csv` for analysis. Any extension you type is ignored. Press Enter without a name to skip saving.
 

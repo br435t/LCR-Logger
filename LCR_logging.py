@@ -40,11 +40,19 @@ SERIAL SETTINGS (must match the meter's front-panel setting):
 INSTALL DEPENDENCIES:
     pip install -r requirements.txt
 
-USAGE:
-    python LCR_logging.py --port COM3                # stream at default 1 kHz
-    python LCR_logging.py --port COM3 --freq 1000    # stream at 1 kHz
-    python LCR_logging.py --port COM3 --sweep        # log-sweep 20 Hz -> 200 kHz
+USAGE (use a /dev/... path on Linux/macOS, COMx on Windows):
+    python LCR_logging.py --port /dev/ttyACM0        # stream at default 1 kHz (Linux direct USB)
+    python LCR_logging.py --port /dev/ttyUSB0        # Linux USB-to-RS232 adapter
+    python LCR_logging.py --port COM3                # Windows
+    python LCR_logging.py --port /dev/ttyACM0 --freq 1000    # stream at 1 kHz
+    python LCR_logging.py --port /dev/ttyACM0 --sweep        # log-sweep 20 Hz -> 200 kHz
     python LCR_logging.py --list-ports               # list available ports
+
+LINUX PERMISSIONS:
+    Serial ports belong to the "dialout" group. If opening the port fails
+    with "Permission denied", add yourself once with
+        sudo usermod -aG dialout $USER
+    then log out and back in (or run "newgrp dialout" in the current shell).
 
 LOGGING:
     All log messages (INFO and above) are written to LCR_logging.log
@@ -56,6 +64,11 @@ LOGGING:
     you type is ignored -- both formats are always produced. The folder
     is created automatically if it does not exist. Press Enter without
     typing a name to skip saving.
+
+    The primary/secondary column headers in both files reflect the meter's
+    current measurement function (e.g. R/X, Cp/D), read via FUNC:IMP? at the
+    start of the sweep. If the function is unrecognised, generic
+    "Primary"/"Secondary" headers are used.
 """
 
 import argparse
@@ -96,6 +109,33 @@ SERIAL_TIMEOUT_S = 2.0
 
 # Log file written to the working directory.
 LOG_FILE = "LCR_logging.log"
+
+# Map each FUNCtion:IMPedance code to its (primary, secondary) parameter
+# labels, so output headers read "R"/"X" or "Cp"/"D" instead of generic
+# "Primary"/"Secondary". Source: 894/895 programming manual, the
+# FUNCtion:IMPedance selection table.
+IMP_FUNCTIONS: dict[str, tuple[str, str]] = {
+    "CPD":  ("Cp", "D"),
+    "CPQ":  ("Cp", "Q"),
+    "CPG":  ("Cp", "G"),
+    "CPRP": ("Cp", "Rp"),
+    "CSD":  ("Cs", "D"),
+    "CSQ":  ("Cs", "Q"),
+    "CSRS": ("Cs", "Rs"),
+    "LPD":  ("Lp", "D"),
+    "LPQ":  ("Lp", "Q"),
+    "LPG":  ("Lp", "G"),
+    "LPRP": ("Lp", "Rp"),
+    "LSD":  ("Ls", "D"),
+    "LSQ":  ("Ls", "Q"),
+    "LSRS": ("Ls", "Rs"),
+    "RX":   ("R", "X"),
+    "ZTD":  ("Z", "theta (deg)"),
+    "ZTR":  ("Z", "theta (rad)"),
+    "GB":   ("G", "B"),
+    "YTD":  ("Y", "theta (deg)"),
+    "YTR":  ("Y", "theta (rad)"),
+}
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -205,6 +245,32 @@ def open_instrument(
     return ser
 
 
+def return_to_local(ser: serial.Serial) -> None:
+    """
+    Undo the remote-control state from open_instrument so the front panel is
+    usable again after the script exits ("reset keylock").
+
+    open_instrument switches the meter to bus triggering (TRIG:SOUR BUS) so
+    *TRG works. Left that way, the meter sits waiting for bus triggers and the
+    front panel stops free-running measurements -- which reads as a locked /
+    frozen panel. This restores internal triggering so live measurement
+    resumes, returns the display to the measurement page, and issues the
+    standard SCPI go-to-local request.
+
+    The 894/895 programming manual documents no keylock/local command, so
+    SYSTem:LOCal is best-effort: if the firmware ignores it, the trigger and
+    display restores above are what actually free the panel. Failures here are
+    logged, not raised -- cleanup must never mask the real exit path.
+    """
+    try:
+        scpi_write(ser, "TRIG:SOUR INT")   # resume front-panel free-running
+        scpi_write(ser, "DISP:PAGE MEAS")  # show the live measurement page
+        scpi_write(ser, "SYSTem:LOCal")    # standard return-to-local (best-effort)
+        log.debug("Meter returned to local front-panel control.")
+    except Exception as exc:
+        log.warning("Could not fully return meter to local control: %s", exc)
+
+
 # ── Low-level helpers ─────────────────────────────────────────────────────────
 
 def fetch_measurement(ser: serial.Serial) -> str:
@@ -244,15 +310,45 @@ def set_frequency(ser: serial.Serial, freq_hz: float) -> None:
     time.sleep(FREQ_SETTLE_S)
 
 
+def get_measurement_labels(ser: serial.Serial) -> tuple[str, str]:
+    """
+    Query the meter's measurement function and return its (primary, secondary)
+    parameter labels -- e.g. ("R", "X") for R-X mode or ("Cp", "D") for Cp-D.
+
+    The script does not set the function; it reads whatever the meter is in
+    (FUNC:IMP?) so output headers reflect the actual measured parameters.
+
+    Falls back to ("Primary", "Secondary") if the meter returns an empty or
+    unrecognised code, so saving never fails just because the mode is unknown.
+    """
+    code = scpi_query(ser, "FUNC:IMP?").strip().upper()
+    if code not in IMP_FUNCTIONS:
+        log.warning(
+            "Measurement function %r not recognised; using generic headers.",
+            code,
+        )
+        return ("Primary", "Secondary")
+    primary, secondary = IMP_FUNCTIONS[code]
+    log.info("Measurement function: %s-%s", primary, secondary)
+    return primary, secondary
+
+
 # ── Sweep result saving ───────────────────────────────────────────────────────
 
-def prompt_and_save(rows: list[tuple[float, str]]) -> None:
+def prompt_and_save(
+    rows: list[tuple[float, str]],
+    primary_label: str = "Primary",
+    secondary_label: str = "Secondary",
+) -> None:
     """
     Prompt the user for a filename and write sweep results to the data folder.
 
     Args:
         rows: List of (frequency_hz, raw_measurement_string) tuples collected
               during the sweep.
+        primary_label: Header for the primary parameter column (e.g. "R", "Cp"),
+              from the meter's current measurement function.
+        secondary_label: Header for the secondary parameter column (e.g. "X", "D").
 
     Behaviour:
         - If the user enters a name, two files are written under DATA_DIR
@@ -285,7 +381,7 @@ def prompt_and_save(rows: list[tuple[float, str]]) -> None:
         parsed.append((freq, primary, secondary, status))
 
     # Human-readable text file.
-    header  = f"{'Freq (Hz)':>14}  {'Primary':>16}  {'Secondary':>16}  {'Status':>8}\n"
+    header  = f"{'Freq (Hz)':>14}  {primary_label:>16}  {secondary_label:>16}  {'Status':>8}\n"
     divider = "-" * 60 + "\n"
     with txt_path.open("w", encoding="utf-8") as f:
         f.write("BK Precision 894 -- Frequency Sweep Results\n")
@@ -299,7 +395,7 @@ def prompt_and_save(rows: list[tuple[float, str]]) -> None:
     # line ending and avoids the blank-line-between-rows quirk on Windows.
     with csv_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["Freq (Hz)", "Primary", "Secondary", "Status"])
+        writer.writerow(["Freq (Hz)", primary_label, secondary_label, "Status"])
         for freq, primary, secondary, status in parsed:
             writer.writerow([f"{freq:.2f}", primary, secondary, status])
 
@@ -328,6 +424,8 @@ def run_sweep(ser: serial.Serial) -> None:
     Logarithmic frequency sweep from 20 Hz to 200 kHz (20 points).
     Prints each step to the console, then prompts to save results.
     """
+    primary_label, secondary_label = get_measurement_labels(ser)
+
     freqs = np.logspace(np.log10(20), np.log10(200_000), num=20)
     log.info("Starting sweep: %d points from 20 Hz to 200 kHz.", len(freqs))
 
@@ -343,7 +441,7 @@ def run_sweep(ser: serial.Serial) -> None:
         print(f"  {freq:14.2f}  {data}")
 
     log.info("Sweep complete. %d points collected.", len(rows))
-    prompt_and_save(rows)
+    prompt_and_save(rows, primary_label, secondary_label)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -406,6 +504,7 @@ def main() -> None:
     finally:
         if ser is not None and ser.is_open:
             try:
+                return_to_local(ser)
                 ser.close()
                 log.debug("Serial port closed.")
             except Exception:

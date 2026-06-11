@@ -13,7 +13,9 @@ Single script: [`LCR_logging.py`](LCR_logging.py). See [`README.md`](README.md) 
 
 ## Hardware status
 
-**The meter has never been connected.** All work to date has been on the code only. The very first real test will be:
+**Confirmed working over serial on Windows (2026-06-11).** The script connects to the meter and streams measurements. The earlier "never been connected" risk is resolved.
+
+To bring up on a fresh setup:
 
 1. Connect the meter via USB.
 2. Front panel: System / Setup → set USB interface mode to **USBCDC** (a.k.a. Virtual COM). The default may be USBTMC, which this script does *not* use.
@@ -60,7 +62,6 @@ If you continue this work, `git checkout main` and go. No more branch juggling r
 
 ## Things explicitly *not* done
 
-- No real hardware test.
 - No automatic measurement-function setup (`FUNC:IMP`).
 - No `TRIG:SOUR BUS` write (see issue #1).
 - No `*RST` at startup — meter state carries over between runs.
