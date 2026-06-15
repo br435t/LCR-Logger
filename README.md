@@ -97,13 +97,15 @@ For a point-and-click alternative to the sweep CLI, run:
 python LCR_gui.py
 ```
 
-It opens a small desktop window (Tkinter — built into Python, nothing to install) where you:
+It starts a tiny local web server (Python's built-in `http.server`, nothing to install) and opens `http://127.0.0.1:<port>/` in your default browser, where you:
 
 1. Pick the **port** (Refresh rescans), **baud**, and optional measurement **function**.
 2. Pre-fill the **filename**, **author**, and **description**. A live **JSON preview** shows exactly what the `.json` sidecar will contain before you commit.
-3. Click **Run sweep & save** — the sweep runs on a background thread (the window stays responsive), each point streams into the progress pane, and the `.txt`/`.csv`/`.json` files are written to `data/`. **Cancel** stops after the current point without saving.
+3. Click **Run sweep & save** — the sweep runs on a background thread (the page stays responsive), each point streams into the progress pane, and the `.txt`/`.csv`/`.json` files are written to `data/`. **Cancel** stops after the current point without saving.
 
-The GUI drives the same instrument code as the CLI ([`LCR_logging.py`](LCR_logging.py)); it only replaces the interactive prompts with form fields. Same hardware setup applies (meter on USBCDC/RS-232C, on its live measurement screen, baud matching the front panel).
+The page is served on loopback only (`127.0.0.1`), so it is not reachable from other machines. Press **Ctrl+C** in the terminal to stop the server when you're done.
+
+A browser UI (rather than Tkinter) is used because Tkinter is not installed on the target machine and there are no admin rights to add the `python3-tk` system package; `http.server` has no such dependency. The GUI drives the same instrument code as the CLI ([`LCR_logging.py`](LCR_logging.py)); it only replaces the interactive prompts with form fields. Same hardware setup applies (meter on USBCDC/RS-232C, on its live measurement screen, baud matching the front panel).
 
 ## Known limitations
 
@@ -122,7 +124,7 @@ The full SCPI reference is in `894_895_programming_manual.pdf`.
 | File | Purpose |
 |---|---|
 | `LCR_logging.py` | The CLI script + reusable instrument helpers |
-| `LCR_gui.py` | Optional Tkinter GUI for sweep + save |
+| `LCR_gui.py` | Optional browser-based GUI (stdlib `http.server`) for sweep + save |
 | `requirements.txt` | Pinned Python dependencies |
 | `894_895_programming_manual.pdf` | Vendor SCPI command reference |
 | `data/` | Sweep results (created on first save) |
