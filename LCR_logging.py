@@ -45,7 +45,9 @@ USAGE (use a /dev/... path on Linux/macOS, COMx on Windows):
     python LCR_logging.py --port /dev/ttyUSB0        # Linux USB-to-RS232 adapter
     python LCR_logging.py --port COM3                # Windows
     python LCR_logging.py --port /dev/ttyACM0 --freq 1000    # stream at 1 kHz
+    python LCR_logging.py --port /dev/ttyACM0 --func RX      # force R-X mode, then stream
     python LCR_logging.py --port /dev/ttyACM0 --sweep        # log-sweep 20 Hz -> 200 kHz
+    python LCR_logging.py --port /dev/ttyACM0 --sweep --func LSRS  # set Ls-Rs, then sweep
     python LCR_logging.py --list-ports               # list available ports
 
 LINUX PERMISSIONS:
@@ -321,13 +323,36 @@ def set_frequency(ser: serial.Serial, freq_hz: float) -> None:
     time.sleep(FREQ_SETTLE_S)
 
 
+def set_measurement_function(ser: serial.Serial, code: str) -> None:
+    """
+    Set the meter's measurement function (e.g. RX, CPD, LSRS) so each run
+    measures a known parameter pair instead of inheriting whatever mode the
+    front panel was last left in -- which makes results non-deterministic
+    across runs.
+
+    `code` must be one of the FUNCtion:IMPedance selections in IMP_FUNCTIONS.
+    Validation happens at argument-parse time (--func choices), so this only
+    ever sees codes the meter understands.
+
+    A relay-settle wait follows the write: switching function can re-range the
+    meter's internal relays, the same way changing frequency does, and querying
+    or measuring too soon can return a stale or garbage reading.
+    """
+    scpi_write(ser, f"FUNC:IMP {code}")
+    primary, secondary = IMP_FUNCTIONS[code]
+    log.info("Measurement function set to %s (%s-%s).", code, primary, secondary)
+    time.sleep(FREQ_SETTLE_S)
+
+
 def get_measurement_labels(ser: serial.Serial) -> tuple[str, str]:
     """
     Query the meter's measurement function and return its (primary, secondary)
     parameter labels -- e.g. ("R", "X") for R-X mode or ("Cp", "D") for Cp-D.
 
-    The script does not set the function; it reads whatever the meter is in
-    (FUNC:IMP?) so output headers reflect the actual measured parameters.
+    This reads back whatever function the meter is currently in (FUNC:IMP?) --
+    either the mode set this run via --func / set_measurement_function, or, if
+    --func was not given, whatever the front panel was last left in -- so the
+    output headers always reflect the actual measured parameters.
 
     Falls back to ("Primary", "Secondary") if the meter returns an empty or
     unrecognised code, so saving never fails just because the mode is unknown.
@@ -502,6 +527,16 @@ def main() -> None:
         help="Test frequency in Hz for continuous stream (default: 1000).",
     )
     parser.add_argument(
+        "--func",
+        type=str.upper,
+        choices=sorted(IMP_FUNCTIONS),
+        metavar="MODE",
+        help="Set the meter's measurement function before measuring, so the "
+             "measured parameter pair is deterministic instead of inheriting "
+             "the front panel's last mode. If omitted, the meter keeps its "
+             "current mode. Choices: " + ", ".join(sorted(IMP_FUNCTIONS)),
+    )
+    parser.add_argument(
         "--sweep",
         action="store_true",
         help="Run a logarithmic frequency sweep instead of streaming.",
@@ -526,6 +561,9 @@ def main() -> None:
     ser = None
     try:
         ser = open_instrument(args.port, baud=args.baud)
+
+        if args.func:
+            set_measurement_function(ser, args.func)
 
         if args.sweep:
             run_sweep(ser)
