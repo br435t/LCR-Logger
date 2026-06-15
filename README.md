@@ -31,6 +31,8 @@ Before running the script, **exit any menus** so the meter is back on its main m
 python LCR_logging.py --list-ports
 ```
 
+`--list-ports` only shows ports backed by a real connected device (those with a USB hardware ID), so it hides the always-present legacy ports (`/dev/ttyS*` on Linux, `COM1`/`COM2` on Windows) that would otherwise clutter the list. **Note:** this also hides a genuine built-in RS-232 port (a native motherboard DB-9), since those carry no USB ID. If you connect the meter to one, skip `--list-ports` and pass it directly, e.g. `--port /dev/ttyS0` (Linux) or `--port COM1` (Windows).
+
 Or look it up manually:
 
 - **Windows:** Device Manager → Ports (COM & LPT) → look for the new COMx after plugging the meter in.
@@ -69,7 +71,19 @@ python LCR_logging.py --list-ports                      # list available serial 
 
 > **Linux permissions:** serial ports are owned by the `dialout` group. If you get `Permission denied` opening the port, add yourself once with `sudo usermod -aG dialout $USER`, then log out and back in (or run `newgrp dialout` in the current terminal).
 
-Press `Ctrl+C` to stop streaming. After a sweep finishes, the script asks for a filename; results are written to `data/` as two files sharing the same stem — a human-readable `.txt` and a `.csv` for analysis. Any extension you type is ignored. Press Enter without a name to skip saving.
+Press `Ctrl+C` to stop streaming. After a sweep finishes, the script asks for a filename, then an author and description; results are written to `data/` as three files sharing the same stem — a human-readable `.txt`, a `.csv` for analysis, and a `.json` metadata sidecar. Any extension you type is ignored. Press Enter without a name to skip saving.
+
+The `.json` sidecar records the run's provenance:
+
+```json
+{
+  "csv_file": "/abs/path/to/data/<name>.csv",
+  "test_time": "2026-06-15T10:30:00",
+  "author": "B. Tester",
+  "description": "Cap bank unit 3, 1uF film cap",
+  "measurement": "R-X"
+}
+```
 
 All console output is also appended to `LCR_logging.log` in the working directory.
 

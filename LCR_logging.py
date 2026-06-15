@@ -58,12 +58,13 @@ LOGGING:
     All log messages (INFO and above) are written to LCR_logging.log
     in the working directory in addition to the console.
 
-    After a sweep completes, you will be prompted to enter a filename.
-    Two files are written into the data/ subfolder using that name as a
-    stem: a human-readable .txt and a .csv for analysis. Any extension
-    you type is ignored -- both formats are always produced. The folder
-    is created automatically if it does not exist. Press Enter without
-    typing a name to skip saving.
+    After a sweep completes, you will be prompted to enter a filename, then
+    an author and description. Three files are written into the data/ subfolder
+    using that name as a stem: a human-readable .txt, a .csv for analysis, and
+    a .json metadata sidecar (csv location, test time, author, description,
+    measurement type). Any extension you type is ignored -- all three are
+    always produced. The folder is created automatically if it does not exist.
+    Press Enter without typing a name to skip saving.
 
     The primary/secondary column headers in both files reflect the meter's
     current measurement function (e.g. R/X, Cp/D), read via FUNC:IMP? at the
@@ -73,8 +74,10 @@ LOGGING:
 
 import argparse
 import csv
+import json
 import logging
 import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -190,16 +193,24 @@ def scpi_query(ser: serial.Serial, cmd: str) -> str:
 
 
 def list_serial_ports() -> None:
-    """Print every serial port the OS currently knows about."""
-    ports = list(serial.tools.list_ports.comports())
+    """
+    Print serial ports backed by a real connected device.
+
+    comports() also reports legacy/built-in ports that always exist whether or
+    not anything is plugged in (e.g. /dev/ttyS* on Linux, COM1 on Windows).
+    Those carry no hardware ID, so we skip them and show only ports that
+    advertise USB/device info -- i.e. things actually connected, such as the
+    meter's USB-CDC port or a USB-to-serial adapter.
+    """
+    ports = sorted(
+        (p for p in serial.tools.list_ports.comports() if p.hwid and p.hwid != "n/a"),
+        key=lambda p: p.device,
+    )
     if not ports:
-        print("No serial ports found.")
+        print("No connected serial devices found.")
         return
     for p in ports:
-        line = f"{p.device}  --  {p.description}"
-        if p.hwid and p.hwid != "n/a":
-            line += f"  [{p.hwid}]"
-        print(line)
+        print(f"{p.device}  --  {p.description}  [{p.hwid}]")
 
 
 # ── Instrument open ───────────────────────────────────────────────────────────
@@ -339,6 +350,7 @@ def prompt_and_save(
     rows: list[tuple[float, str]],
     primary_label: str = "Primary",
     secondary_label: str = "Secondary",
+    test_time: datetime | None = None,
 ) -> None:
     """
     Prompt the user for a filename and write sweep results to the data folder.
@@ -349,12 +361,17 @@ def prompt_and_save(
         primary_label: Header for the primary parameter column (e.g. "R", "Cp"),
               from the meter's current measurement function.
         secondary_label: Header for the secondary parameter column (e.g. "X", "D").
+        test_time: When the sweep was run, recorded in the JSON sidecar. Defaults
+              to the current time if not supplied.
 
     Behaviour:
-        - If the user enters a name, two files are written under DATA_DIR
-          sharing the same stem: a human-readable .txt and a .csv for
-          downstream analysis. Any extension the user types is ignored --
-          both formats are always produced.
+        - If the user enters a name, three files are written under DATA_DIR
+          sharing the same stem: a human-readable .txt, a .csv for downstream
+          analysis, and a .json metadata sidecar (csv location, test time,
+          author, description, measurement type). Any extension the user types
+          is ignored -- all three are always produced.
+        - The user is prompted for an author and description, which go into the
+          JSON sidecar. Either may be left blank.
         - If the user presses Enter without typing a name, saving is skipped.
         - DATA_DIR is created automatically if it does not already exist.
     """
@@ -365,11 +382,15 @@ def prompt_and_save(
         log.info("Save skipped -- no filename entered.")
         return
 
-    # Strip whatever extension the user typed; we always write both .txt and .csv.
+    author      = input("Data author (optional): ").strip()
+    description = input("Description (optional): ").strip()
+
+    # Strip whatever extension the user typed; we always write .txt, .csv, .json.
     bare = Path(name).with_suffix("")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    txt_path = DATA_DIR / bare.with_suffix(".txt")
-    csv_path = DATA_DIR / bare.with_suffix(".csv")
+    txt_path  = DATA_DIR / bare.with_suffix(".txt")
+    csv_path  = DATA_DIR / bare.with_suffix(".csv")
+    json_path = DATA_DIR / bare.with_suffix(".json")
 
     # Parse once so both writers see the same fields.
     parsed: list[tuple[float, str, str, str]] = []
@@ -399,8 +420,21 @@ def prompt_and_save(
         for freq, primary, secondary, status in parsed:
             writer.writerow([f"{freq:.2f}", primary, secondary, status])
 
+    # JSON metadata sidecar describing this run, for cataloguing/analysis.
+    metadata = {
+        "csv_file": str(csv_path.resolve()),
+        "test_time": (test_time or datetime.now()).isoformat(timespec="seconds"),
+        "author": author,
+        "description": description,
+        "measurement": f"{primary_label}-{secondary_label}",
+    }
+    with json_path.open("w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
+        f.write("\n")
+
     log.info("Sweep results saved to: %s", txt_path.resolve())
     log.info("Sweep results saved to: %s", csv_path.resolve())
+    log.info("Sweep metadata saved to: %s", json_path.resolve())
 
 
 # ── Modes ─────────────────────────────────────────────────────────────────────
@@ -425,6 +459,7 @@ def run_sweep(ser: serial.Serial) -> None:
     Prints each step to the console, then prompts to save results.
     """
     primary_label, secondary_label = get_measurement_labels(ser)
+    test_time = datetime.now()
 
     freqs = np.logspace(np.log10(20), np.log10(200_000), num=20)
     log.info("Starting sweep: %d points from 20 Hz to 200 kHz.", len(freqs))
@@ -441,7 +476,7 @@ def run_sweep(ser: serial.Serial) -> None:
         print(f"  {freq:14.2f}  {data}")
 
     log.info("Sweep complete. %d points collected.", len(rows))
-    prompt_and_save(rows, primary_label, secondary_label)
+    prompt_and_save(rows, primary_label, secondary_label, test_time)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
