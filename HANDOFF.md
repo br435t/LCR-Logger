@@ -4,12 +4,12 @@ Snapshot of project state, intended for whoever picks this up next (future Claud
 
 ## What this is
 
-A Python CLI for streaming and logging measurements from a **B&K Precision 894** LCR meter. Two modes:
+A Python tool for streaming and logging measurements from a **B&K Precision 894** LCR meter. Two modes:
 
 - **Streaming** — continuous polling at a fixed frequency (`--freq`).
-- **Sweep** — logarithmic frequency sweep 20 Hz → 200 kHz (20 points), saved to a text file in `data/`.
+- **Sweep** — logarithmic frequency sweep 20 Hz → 200 kHz (20 points), saved to `data/` as `.txt`/`.csv`/`.json`.
 
-Single script: [`LCR_logging.py`](LCR_logging.py). See [`README.md`](README.md) for setup and [`894_895_programming_manual.pdf`](894_895_programming_manual.pdf) for the SCPI reference.
+CLI: [`LCR_logging.py`](LCR_logging.py) — also exposes reusable helpers (`get_serial_ports`, `collect_sweep`, `save_sweep`, etc.). GUI: [`LCR_gui.py`](LCR_gui.py), a Tkinter front end for the sweep + save flow that drives those same helpers. See [`README.md`](README.md) for setup and [`894_895_programming_manual.pdf`](894_895_programming_manual.pdf) for the SCPI reference.
 
 ## Hardware status
 
@@ -65,7 +65,7 @@ If you continue this work, `git checkout Front-End` and go.
 - ~~No automatic measurement-function setup (`FUNC:IMP`).~~ Done via `--func` (still opt-in; default behaviour is unchanged).
 - No `TRIG:SOUR BUS` write (see issue #1).
 - No `*RST` at startup — meter state carries over between runs.
-- No GUI, no plotting. Sweep output is plain text only.
+- ~~No GUI~~ — `LCR_gui.py` is a Tkinter front end for the sweep + save flow (pre-fill metadata, live JSON preview, threaded run). No plotting yet; sweep output is still text/CSV/JSON only, and the GUI covers sweep only (no live-stream view).
 - No LAN/Ethernet transport (would need raw TCP to port 5025).
 - The status byte and bin number are not surfaced to the user — they're either dropped or printed raw.
 
@@ -75,7 +75,8 @@ All tracked status below is for the `Front-End` branch.
 
 | File | What it is | Tracked? |
 |---|---|---|
-| `LCR_logging.py` | The script (serial version) | Yes |
+| `LCR_logging.py` | The CLI script (serial version) + reusable instrument helpers | Yes |
+| `LCR_gui.py` | Tkinter GUI front end for the sweep + save flow | Yes |
 | `requirements.txt` | Pinned deps: `numpy`, `pyserial` | Yes |
 | `README.md` | User-facing setup + usage | Yes |
 | `HANDOFF.md` | This file | Yes |

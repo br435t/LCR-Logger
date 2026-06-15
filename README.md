@@ -89,6 +89,22 @@ The `.json` sidecar records the run's provenance:
 
 All console output is also appended to `LCR_logging.log` in the working directory.
 
+## GUI
+
+For a point-and-click alternative to the sweep CLI, run:
+
+```sh
+python LCR_gui.py
+```
+
+It opens a small desktop window (Tkinter — built into Python, nothing to install) where you:
+
+1. Pick the **port** (Refresh rescans), **baud**, and optional measurement **function**.
+2. Pre-fill the **filename**, **author**, and **description**. A live **JSON preview** shows exactly what the `.json` sidecar will contain before you commit.
+3. Click **Run sweep & save** — the sweep runs on a background thread (the window stays responsive), each point streams into the progress pane, and the `.txt`/`.csv`/`.json` files are written to `data/`. **Cancel** stops after the current point without saving.
+
+The GUI drives the same instrument code as the CLI ([`LCR_logging.py`](LCR_logging.py)); it only replaces the interactive prompts with form fields. Same hardware setup applies (meter on USBCDC/RS-232C, on its live measurement screen, baud matching the front panel).
+
 ## Known limitations
 
 See the docstring at the top of [`LCR_logging.py`](LCR_logging.py) for full details. Highlights:
@@ -105,7 +121,8 @@ The full SCPI reference is in `894_895_programming_manual.pdf`.
 
 | File | Purpose |
 |---|---|
-| `LCR_logging.py` | The script (entry point + helpers) |
+| `LCR_logging.py` | The CLI script + reusable instrument helpers |
+| `LCR_gui.py` | Optional Tkinter GUI for sweep + save |
 | `requirements.txt` | Pinned Python dependencies |
 | `894_895_programming_manual.pdf` | Vendor SCPI command reference |
 | `data/` | Sweep results (created on first save) |

@@ -92,6 +92,13 @@ import serial.tools.list_ports
 # The folder is created automatically if it does not exist.
 DATA_DIR = Path("data")
 
+# Default frequency sweep span and point count (log-spaced). Shared by the CLI
+# and GUI. 20 Hz is the meter's floor; 200 kHz stays within both the 894
+# (500 kHz) and 895 (1 MHz) ranges.
+SWEEP_START_HZ = 20.0
+SWEEP_STOP_HZ = 200_000.0
+SWEEP_POINTS = 20
+
 # How long (seconds) to wait after changing frequency before measuring.
 # The 894 switches internal relays; skipping this causes garbage reads.
 FREQ_SETTLE_S = 0.8
@@ -194,25 +201,36 @@ def scpi_query(ser: serial.Serial, cmd: str) -> str:
     return line.decode("ascii", errors="replace").strip()
 
 
-def list_serial_ports() -> None:
+def get_serial_ports() -> list[tuple[str, str, str]]:
     """
-    Print serial ports backed by a real connected device.
+    Return serial ports backed by a real connected device, as
+    (device, description, hwid) tuples sorted by device name.
 
     comports() also reports legacy/built-in ports that always exist whether or
     not anything is plugged in (e.g. /dev/ttyS* on Linux, COM1 on Windows).
     Those carry no hardware ID, so we skip them and show only ports that
     advertise USB/device info -- i.e. things actually connected, such as the
     meter's USB-CDC port or a USB-to-serial adapter.
+
+    Note: this also hides a genuine built-in RS-232 port (a native DB-9), since
+    those carry no USB ID -- pass such a port explicitly rather than discovering
+    it here. Shared by the CLI's --list-ports and the GUI's port dropdown.
     """
     ports = sorted(
         (p for p in serial.tools.list_ports.comports() if p.hwid and p.hwid != "n/a"),
         key=lambda p: p.device,
     )
+    return [(p.device, p.description, p.hwid) for p in ports]
+
+
+def list_serial_ports() -> None:
+    """Print the connected serial ports from get_serial_ports()."""
+    ports = get_serial_ports()
     if not ports:
         print("No connected serial devices found.")
         return
-    for p in ports:
-        print(f"{p.device}  --  {p.description}  [{p.hwid}]")
+    for device, description, hwid in ports:
+        print(f"{device}  --  {description}  [{hwid}]")
 
 
 # ── Instrument open ───────────────────────────────────────────────────────────
@@ -371,46 +389,38 @@ def get_measurement_labels(ser: serial.Serial) -> tuple[str, str]:
 
 # ── Sweep result saving ───────────────────────────────────────────────────────
 
-def prompt_and_save(
+def save_sweep(
     rows: list[tuple[float, str]],
+    name: str,
+    author: str = "",
+    description: str = "",
     primary_label: str = "Primary",
     secondary_label: str = "Secondary",
     test_time: datetime | None = None,
-) -> None:
+) -> tuple[Path, Path, Path]:
     """
-    Prompt the user for a filename and write sweep results to the data folder.
+    Write sweep results to the data folder. No prompting -- all metadata is
+    passed in, so this is shared by the CLI (which gathers it via input()) and
+    the GUI (which gathers it from form fields).
 
     Args:
         rows: List of (frequency_hz, raw_measurement_string) tuples collected
               during the sweep.
+        name: Filename stem. Any extension is stripped; .txt, .csv, and .json
+              are always produced from this stem.
+        author: Free-text author, recorded in the JSON sidecar. May be blank.
+        description: Free-text description for the JSON sidecar. May be blank.
         primary_label: Header for the primary parameter column (e.g. "R", "Cp"),
               from the meter's current measurement function.
         secondary_label: Header for the secondary parameter column (e.g. "X", "D").
         test_time: When the sweep was run, recorded in the JSON sidecar. Defaults
               to the current time if not supplied.
 
-    Behaviour:
-        - If the user enters a name, three files are written under DATA_DIR
-          sharing the same stem: a human-readable .txt, a .csv for downstream
-          analysis, and a .json metadata sidecar (csv location, test time,
-          author, description, measurement type). Any extension the user types
-          is ignored -- all three are always produced.
-        - The user is prompted for an author and description, which go into the
-          JSON sidecar. Either may be left blank.
-        - If the user presses Enter without typing a name, saving is skipped.
-        - DATA_DIR is created automatically if it does not already exist.
+    Returns:
+        (txt_path, csv_path, json_path) -- the three files written. DATA_DIR is
+        created automatically if it does not already exist.
     """
-    print()
-    name = input("Enter filename to save sweep results (or press Enter to skip): ").strip()
-
-    if not name:
-        log.info("Save skipped -- no filename entered.")
-        return
-
-    author      = input("Data author (optional): ").strip()
-    description = input("Description (optional): ").strip()
-
-    # Strip whatever extension the user typed; we always write .txt, .csv, .json.
+    # Strip whatever extension the caller passed; we always write .txt/.csv/.json.
     bare = Path(name).with_suffix("")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     txt_path  = DATA_DIR / bare.with_suffix(".txt")
@@ -460,6 +470,30 @@ def prompt_and_save(
     log.info("Sweep results saved to: %s", txt_path.resolve())
     log.info("Sweep results saved to: %s", csv_path.resolve())
     log.info("Sweep metadata saved to: %s", json_path.resolve())
+    return txt_path, csv_path, json_path
+
+
+def prompt_and_save(
+    rows: list[tuple[float, str]],
+    primary_label: str = "Primary",
+    secondary_label: str = "Secondary",
+    test_time: datetime | None = None,
+) -> None:
+    """
+    CLI wrapper around save_sweep: prompt for filename, author, and description,
+    then write the files. Press Enter at the filename prompt to skip saving.
+    """
+    print()
+    name = input("Enter filename to save sweep results (or press Enter to skip): ").strip()
+
+    if not name:
+        log.info("Save skipped -- no filename entered.")
+        return
+
+    author      = input("Data author (optional): ").strip()
+    description = input("Description (optional): ").strip()
+
+    save_sweep(rows, name, author, description, primary_label, secondary_label, test_time)
 
 
 # ── Modes ─────────────────────────────────────────────────────────────────────
@@ -478,29 +512,65 @@ def stream_continuous(ser: serial.Serial, freq_hz: float) -> None:
         time.sleep(STREAM_INTERVAL_S)
 
 
-def run_sweep(ser: serial.Serial) -> None:
+def collect_sweep(
+    ser: serial.Serial,
+    start_hz: float = SWEEP_START_HZ,
+    stop_hz: float = SWEEP_STOP_HZ,
+    points: int = SWEEP_POINTS,
+    progress=None,
+    should_stop=None,
+) -> tuple[list[tuple[float, str]], str, str, datetime]:
     """
-    Logarithmic frequency sweep from 20 Hz to 200 kHz (20 points).
-    Prints each step to the console, then prompts to save results.
+    Run a logarithmic frequency sweep and return the collected rows plus the
+    metadata needed to save them. No console printing and no saving -- those
+    are the caller's job -- so this is shared by the CLI and the GUI.
+
+    Args:
+        start_hz, stop_hz, points: Sweep span and point count (log-spaced).
+        progress: Optional callback(i, total, freq_hz, raw_data) invoked after
+                  each point, e.g. to print to the console or update a GUI.
+        should_stop: Optional callable returning True to abort the sweep early
+                  (used by the GUI's Cancel button). Checked before each point.
+
+    Returns:
+        (rows, primary_label, secondary_label, test_time), where rows is a list
+        of (frequency_hz, raw_measurement_string) tuples ready for save_sweep().
     """
     primary_label, secondary_label = get_measurement_labels(ser)
     test_time = datetime.now()
 
-    freqs = np.logspace(np.log10(20), np.log10(200_000), num=20)
-    log.info("Starting sweep: %d points from 20 Hz to 200 kHz.", len(freqs))
-
-    print(f"\n{'Freq (Hz)':>14}  {'Measurement'}")
-    print("-" * 50)
+    freqs = np.logspace(np.log10(start_hz), np.log10(stop_hz), num=points)
+    log.info(
+        "Starting sweep: %d points from %.0f Hz to %.0f Hz.",
+        len(freqs), start_hz, stop_hz,
+    )
 
     rows: list[tuple[float, str]] = []
-
-    for freq in freqs:
+    for i, freq in enumerate(freqs, start=1):
+        if should_stop is not None and should_stop():
+            log.info("Sweep cancelled after %d/%d points.", i - 1, len(freqs))
+            break
         set_frequency(ser, freq)
         data = fetch_measurement(ser)
         rows.append((freq, data))
-        print(f"  {freq:14.2f}  {data}")
+        if progress is not None:
+            progress(i, len(freqs), freq, data)
 
     log.info("Sweep complete. %d points collected.", len(rows))
+    return rows, primary_label, secondary_label, test_time
+
+
+def run_sweep(ser: serial.Serial) -> None:
+    """
+    CLI sweep: print each step to the console, then prompt to save results.
+    """
+    print(f"\n{'Freq (Hz)':>14}  {'Measurement'}")
+    print("-" * 50)
+
+    def _print(i: int, total: int, freq: float, data: str) -> None:
+        print(f"  {freq:14.2f}  {data}")
+
+    rows, primary_label, secondary_label, test_time = collect_sweep(ser, progress=_print)
     prompt_and_save(rows, primary_label, secondary_label, test_time)
 
 
