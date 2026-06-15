@@ -4,12 +4,12 @@ Snapshot of project state, intended for whoever picks this up next (future Claud
 
 ## What this is
 
-A Python CLI for streaming and logging measurements from a **B&K Precision 894** LCR meter. Two modes:
+A Python tool for streaming and logging measurements from a **B&K Precision 894** LCR meter. Two modes:
 
 - **Streaming** — continuous polling at a fixed frequency (`--freq`).
-- **Sweep** — logarithmic frequency sweep 20 Hz → 200 kHz (20 points), saved to a text file in `data/`.
+- **Sweep** — logarithmic frequency sweep 20 Hz → 200 kHz (20 points), saved to `data/` as `.txt`/`.csv`/`.json`.
 
-Single script: [`LCR_logging.py`](LCR_logging.py). See [`README.md`](README.md) for setup and [`894_895_programming_manual.pdf`](894_895_programming_manual.pdf) for the SCPI reference.
+CLI: [`LCR_logging.py`](LCR_logging.py) — also exposes reusable helpers (`get_serial_ports`, `collect_sweep`, `save_sweep`, etc.). GUI: [`LCR_gui.py`](LCR_gui.py), a browser-based front end (stdlib `http.server`, served on `127.0.0.1`) for the sweep + save flow that drives those same helpers. See [`README.md`](README.md) for setup and [`894_895_programming_manual.pdf`](894_895_programming_manual.pdf) for the SCPI reference.
 
 ## Hardware status
 
@@ -42,7 +42,7 @@ Documented in the docstring at the top of `LCR_logging.py` and in `README.md`. R
 | # | Issue | Severity |
 |---|-------|----------|
 | 1 | ~~`*TRG` requires `TRIG:SOUR BUS`. The script never sets this...~~ **Fixed:** `open_instrument` now sends `TRIG:SOUR BUS` at startup. | Resolved |
-| 2 | Measurement function (Cp-D, Ls-Q, R-X, etc.) is never set. The meter uses whatever mode was last selected on the front panel. Non-deterministic across runs. | Design gap |
+| 2 | ~~Measurement function (Cp-D, Ls-Q, R-X, etc.) is never set...~~ **Fixed:** `--func <MODE>` writes `FUNC:IMP <code>` at startup (see `set_measurement_function`). Still optional — omitting it keeps the front-panel mode, as before. | Resolved |
 | 3 | `FETCH?` parsing assumes 3 fields. With comparator on, the meter appends a 4th `<bin number>` field that's silently dropped. | Minor |
 | 4 | Status byte not decoded. Manual p.31: `00`=normal, `-1`=no data, `+1..+4`=various errors. Script prints the raw value without flagging non-zero. | Minor |
 
@@ -54,33 +54,37 @@ GitHub: `https://github.com/bnt1002/LCR-Logger` (private).
 
 Branches:
 
-- `main` — **current working branch.** Holds the serial refactor, this handoff doc, and (as of the latest pass) the `TRIG:SOUR BUS` fix and the RS-232C / USBCDC interface-selection docs.
-- `driver-change-windows` — superseded snapshot from before the work was folded into `main`. Safe to delete locally and on origin once you're confident nothing on it is needed.
-- `Windows` — already gone.
+- `Front-End` — **current working branch.** Holds everything: the serial refactor, the `TRIG:SOUR BUS` fix, the RS-232C / USBCDC interface-selection docs, the CSV/JSON output, example data, this handoff doc, and the README. ~17 commits ahead of `main`.
+- `main` — **behind.** Has not yet received the serial refactor (tip is "Add numpy to requirements.txt"). Bring it up to date by merging `Front-End` into it when the work is ready to land.
+- `Windows`, `driver-change-windows` — superseded snapshots, both fully merged into `Front-End`. Safe to delete locally and on origin once you're confident nothing on them is needed.
 
-If you continue this work, `git checkout main` and go. No more branch juggling required.
+If you continue this work, `git checkout Front-End` and go.
 
 ## Things explicitly *not* done
 
-- No automatic measurement-function setup (`FUNC:IMP`).
+- ~~No automatic measurement-function setup (`FUNC:IMP`).~~ Done via `--func` (still opt-in; default behaviour is unchanged).
 - No `TRIG:SOUR BUS` write (see issue #1).
 - No `*RST` at startup — meter state carries over between runs.
-- No GUI, no plotting. Sweep output is plain text only.
+- ~~No GUI~~ — `LCR_gui.py` is a browser-based front end for the sweep + save flow (pre-fill metadata, live JSON preview, threaded run). It serves a page from the stdlib `http.server` on `127.0.0.1` rather than using Tkinter, which is not installed on the target machine (no `python3-tk`, no admin rights). No plotting yet; sweep output is still text/CSV/JSON only, and the GUI covers sweep only (no live-stream view).
 - No LAN/Ethernet transport (would need raw TCP to port 5025).
 - The status byte and bin number are not surfaced to the user — they're either dropped or printed raw.
 
 ## Files
 
+All tracked status below is for the `Front-End` branch.
+
 | File | What it is | Tracked? |
 |---|---|---|
-| `LCR_logging.py` | The script | Yes (USBTMC version on `main`, serial version uncommitted on `Windows`) |
-| `requirements.txt` | Pinned deps: `numpy`, `pyserial` | Yes on `main` (older content); uncommitted update on `Windows` |
-| `README.md` | User-facing setup + usage | Uncommitted |
-| `HANDOFF.md` | This file | Uncommitted |
-| `894_895_programming_manual.pdf` | Vendor SCPI reference (~1.2 MB) | Yes on `Windows` |
+| `LCR_logging.py` | The CLI script (serial version) + reusable instrument helpers | Yes |
+| `LCR_gui.py` | Browser-based GUI front end (stdlib `http.server`) for the sweep + save flow | Yes |
+| `requirements.txt` | Pinned deps: `numpy`, `pyserial` | Yes |
+| `README.md` | User-facing setup + usage | Yes |
+| `HANDOFF.md` | This file | Yes |
+| `894_895_programming_manual.pdf` | Vendor SCPI reference (~1.2 MB) | Yes |
+| `Example_data/` | Sample `.txt`/`.csv`/`.json` sweep outputs | Yes |
 | `.gitignore` | `.venv/`, `__pycache__/`, `*.pyc`, `*.log` | Yes |
 | `.venv/` | Local virtualenv + corp CA bundle + `pip.ini` | No (gitignored) |
-| `data/` | Sweep results (created on first save) | No (not created yet) |
+| `data/` | Sweep results (created on first save) | No (gitignored) |
 | `LCR_logging.log` | Session log (created on first run) | No (gitignored) |
 
 ## How to pick up

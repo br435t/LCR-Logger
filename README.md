@@ -65,7 +65,9 @@ python LCR_logging.py --port /dev/ttyUSB0               # Linux USB-to-RS232 ada
 python LCR_logging.py --port COM3                       # Windows
 python LCR_logging.py --port /dev/ttyACM0 --freq 10000  # stream at 10 kHz
 python LCR_logging.py --port /dev/ttyACM0 --baud 115200 # higher baud (must match meter)
+python LCR_logging.py --port /dev/ttyACM0 --func RX     # force R-X mode, then stream
 python LCR_logging.py --port /dev/ttyACM0 --sweep       # log-sweep 20 Hz -> 200 kHz, then prompt to save
+python LCR_logging.py --port /dev/ttyACM0 --sweep --func LSRS  # set Ls-Rs, then sweep
 python LCR_logging.py --list-ports                      # list available serial ports
 ```
 
@@ -87,11 +89,29 @@ The `.json` sidecar records the run's provenance:
 
 All console output is also appended to `LCR_logging.log` in the working directory.
 
+## GUI
+
+For a point-and-click alternative to the sweep CLI, run:
+
+```sh
+python LCR_gui.py
+```
+
+It starts a tiny local web server (Python's built-in `http.server`, nothing to install) and opens `http://127.0.0.1:<port>/` in your default browser, where you:
+
+1. Pick the **port** (Refresh rescans), **baud**, and optional measurement **function**.
+2. Pre-fill the **filename**, **author**, and **description**. A live **JSON preview** shows exactly what the `.json` sidecar will contain before you commit.
+3. Click **Run sweep & save** — the sweep runs on a background thread (the page stays responsive), each point streams into the progress pane, and the `.txt`/`.csv`/`.json` files are written to `data/`. **Cancel** stops after the current point without saving.
+
+The page is served on loopback only (`127.0.0.1`), so it is not reachable from other machines. Press **Ctrl+C** in the terminal to stop the server when you're done.
+
+A browser UI (rather than Tkinter) is used because Tkinter is not installed on the target machine and there are no admin rights to add the `python3-tk` system package; `http.server` has no such dependency. The GUI drives the same instrument code as the CLI ([`LCR_logging.py`](LCR_logging.py)); it only replaces the interactive prompts with form fields. Same hardware setup applies (meter on USBCDC/RS-232C, on its live measurement screen, baud matching the front panel).
+
 ## Known limitations
 
 See the docstring at the top of [`LCR_logging.py`](LCR_logging.py) for full details. Highlights:
 
-- The measurement function (Cp-D, Ls-Q, R-X, etc.) is **not** set by the script — it uses whatever mode the meter was last in. Set it on the front panel before starting, or add a `FUNC:IMP <mode>` write to `open_instrument`.
+- The measurement function (Cp-D, Ls-Q, R-X, etc.) can be set with `--func <MODE>` (e.g. `--func RX`, `--func LSRS`), which makes the measured parameter pair deterministic. If `--func` is omitted, the script uses whatever mode the meter was last left in. Valid modes are the FUNC:IMP codes listed in `--help`.
 - `*TRG` only works when the meter's trigger source is `BUS`. The script sends `TRIG:SOUR BUS` during `open_instrument` so this is handled at startup; if you ever bypass that path, freshly triggered reads will silently fall back to the free-running result.
 - The `FETCH?` response is parsed as `<primary>, <secondary>, <status>`. When the comparator is enabled the meter also returns a `<bin number>` field, which is silently dropped.
 - Status byte values per the manual: `00` = normal, `-1` = no data in buffer, `+1` = analog unbalance, `+2` = A/D not working, `+3` = signal source overload, `+4` = constant voltage can't be adjusted. The script does not flag non-zero statuses — inspect the raw output.
@@ -103,7 +123,8 @@ The full SCPI reference is in `894_895_programming_manual.pdf`.
 
 | File | Purpose |
 |---|---|
-| `LCR_logging.py` | The script (entry point + helpers) |
+| `LCR_logging.py` | The CLI script + reusable instrument helpers |
+| `LCR_gui.py` | Optional browser-based GUI (stdlib `http.server`) for sweep + save |
 | `requirements.txt` | Pinned Python dependencies |
 | `894_895_programming_manual.pdf` | Vendor SCPI command reference |
 | `data/` | Sweep results (created on first save) |
