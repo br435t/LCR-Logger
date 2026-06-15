@@ -29,12 +29,14 @@ Same hardware setup as the CLI applies: meter on USBCDC (or RS-232C), back on
 its live measurement screen, baud matching the front panel. See README.md.
 """
 
+import csv
 import json
 import threading
 import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import LCR_logging as lcr
 
@@ -70,6 +72,8 @@ class SweepState:
         self.total = 0
         self.error: str | None = None
         self.saved: list[str] | None = None
+        # Numeric sweep series for the visualizer (set when a sweep collects).
+        self.plot: dict | None = None
 
     def is_running(self) -> bool:
         return self.worker is not None and self.worker.is_alive()
@@ -116,6 +120,97 @@ def build_preview(name: str, author: str, description: str, func: str) -> dict:
     }
 
 
+def _to_float(text: str) -> float | None:
+    """Parse one measurement field to float, or None if it isn't numeric."""
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def build_plot(
+    rows: list[tuple[float, str]], primary_label: str, secondary_label: str
+) -> dict:
+    """
+    Turn collected sweep rows into numeric series the browser can plot:
+    frequency (X) against either measured column (Y). Non-numeric fields become
+    null and are skipped client-side. Frequencies are cast to plain float so
+    json.dumps accepts them (collect_sweep yields numpy floats).
+    """
+    freq, primary, secondary = [], [], []
+    for f, data in rows:
+        parts = data.split(",")
+        freq.append(float(f))
+        primary.append(_to_float(parts[0].strip() if len(parts) > 0 else ""))
+        secondary.append(_to_float(parts[1].strip() if len(parts) > 1 else ""))
+    return {
+        "freq": freq,
+        "primary": primary,
+        "secondary": secondary,
+        "primary_label": primary_label,
+        "secondary_label": secondary_label,
+    }
+
+
+# ── Saved datasets (for the visualizer's dataset dropdown) ────────────────────
+
+def dataset_dir(folder: str = "") -> Path:
+    """The folder to scan for datasets: the user-supplied one, else DATA_DIR."""
+    folder = (folder or "").strip()
+    return Path(folder).expanduser() if folder else lcr.DATA_DIR
+
+
+def list_datasets(folder: str = "") -> list[str]:
+    """Names (stems) of sweeps with a .csv in `folder` (defaults to DATA_DIR)."""
+    base = dataset_dir(folder)
+    if not base.is_dir():
+        return []
+    return sorted(p.stem for p in base.glob("*.csv"))
+
+
+def load_dataset(name: str, folder: str = "") -> dict | None:
+    """
+    Parse a saved sweep CSV into the same structure build_plot produces.
+
+    The CSV header is [Freq (Hz), <primary_label>, <secondary_label>, Status]
+    as written by save_sweep, so the column labels come straight from the file.
+    `folder` is the user-selected scan folder (defaults to DATA_DIR); only a
+    bare filename within it is accepted (Path(name).name strips any directory
+    components) so a crafted name can't escape the chosen folder. Returns None
+    if the file is missing or unreadable.
+    """
+    csv_path = dataset_dir(folder) / f"{Path(name).name}.csv"
+    if not csv_path.is_file():
+        return None
+    try:
+        with csv_path.open("r", encoding="utf-8", newline="") as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            if not header:
+                return None
+            primary_label = header[1] if len(header) > 1 else "Primary"
+            secondary_label = header[2] if len(header) > 2 else "Secondary"
+            freq, primary, secondary = [], [], []
+            for row in reader:
+                if not row:
+                    continue
+                f_hz = _to_float(row[0]) if len(row) > 0 else None
+                if f_hz is None:  # frequency is the X axis -- skip if it didn't parse
+                    continue
+                freq.append(f_hz)
+                primary.append(_to_float(row[1]) if len(row) > 1 else None)
+                secondary.append(_to_float(row[2]) if len(row) > 2 else None)
+    except (OSError, UnicodeDecodeError, csv.Error):
+        return None
+    return {
+        "freq": freq,
+        "primary": primary,
+        "secondary": secondary,
+        "primary_label": primary_label,
+        "secondary_label": secondary_label,
+    }
+
+
 # ── Sweep worker (mirrors the old _run_worker) ───────────────────────────────
 
 def run_sweep_worker(params: dict) -> None:
@@ -141,6 +236,11 @@ def run_sweep_worker(params: dict) -> None:
         rows, primary, secondary, test_time = lcr.collect_sweep(
             ser, progress=progress, should_stop=STATE.stop_event.is_set
         )
+
+        # Expose the data to the visualizer even if the sweep was cancelled
+        # partway -- a partial curve is still worth seeing.
+        with STATE.lock:
+            STATE.plot = build_plot(rows, primary, secondary)
 
         if STATE.stop_event.is_set():
             STATE.log("Sweep cancelled -- nothing saved.")
@@ -183,7 +283,7 @@ def start_sweep(params: dict) -> dict:
     if not name:
         return {"error": "Enter a filename for the saved results."}
     try:
-        baud = int(params.get("baud"))
+        baud = int(params.get("baud")) # pyright: ignore[reportArgumentType]
     except (TypeError, ValueError):
         return {"error": f"Baud must be a number, got {params.get('baud')!r}."}
 
@@ -235,6 +335,9 @@ PAGE = """<!doctype html>
   pre { background: #8881; border-radius: 6px; padding: 8px; margin: 0;
         white-space: pre-wrap; word-break: break-word; }
   #log { height: 220px; overflow: auto; }
+  canvas { width: 100%; max-width: 680px; height: auto; display: block;
+           margin-top: 8px; border: 1px solid #8884; border-radius: 6px;
+           background: #8881; }
 </style>
 </head>
 <body>
@@ -286,6 +389,42 @@ PAGE = """<!doctype html>
 <fieldset>
   <legend>Progress</legend>
   <pre id="log"></pre>
+</fieldset>
+
+<fieldset>
+  <legend>Visualizer</legend>
+  <div class="row">
+    <label for="folder">Folder</label>
+    <input id="folder" value="data" placeholder="folder to scan for .csv datasets">
+    <button id="scan" type="button">Scan</button>
+  </div>
+  <div class="row">
+    <label for="dataset">Dataset</label>
+    <select id="dataset"></select>
+    <span></span>
+  </div>
+  <div class="row">
+    <label for="column">Column (Y)</label>
+    <select id="column"></select>
+    <span></span>
+  </div>
+  <div class="row">
+    <label for="xscale">X scale</label>
+    <select id="xscale">
+      <option value="log" selected>log</option>
+      <option value="linear">linear</option>
+    </select>
+    <span></span>
+  </div>
+  <div class="row">
+    <label for="yscale">Y scale</label>
+    <select id="yscale">
+      <option value="linear" selected>linear</option>
+      <option value="log">log</option>
+    </select>
+    <span></span>
+  </div>
+  <canvas id="plot" width="680" height="360"></canvas>
 </fieldset>
 
 <script>
@@ -347,6 +486,7 @@ async function poll() {
   $("bar").value = s.i;
   setRunning(s.running);
   if (!s.running && !notified) {
+    showCurrent();  // rescan saved datasets, then show the fresh sweep
     if (s.error) alert("Error: " + s.error);
     else if (s.saved) alert("Wrote:\\n" + s.saved.join("\\n"));
     notified = true;
@@ -378,14 +518,238 @@ async function cancel() {
   await fetch("api/cancel", { method: "POST" });
 }
 
+// ── Visualizer ───────────────────────────────────────────────
+// Plots frequency (X) against the selected measured column (Y) on a canvas.
+// Vanilla JS so there is nothing to load from a CDN -- keeps it offline.
+let plotData = null;
+
+function fmtNum(v) {
+  if (v === 0) return "0";
+  const a = Math.abs(v);
+  if (a >= 1e4 || a < 1e-2) return v.toExponential(1);
+  return (Math.round(v * 1000) / 1000).toString();
+}
+
+// SI prefixes for Y-axis scaling (engineering powers of 1000).
+const SI_PREFIXES = [
+  [1e9, "G"], [1e6, "M"], [1e3, "k"], [1, ""],
+  [1e-3, "m"], [1e-6, "µ"], [1e-9, "n"], [1e-12, "p"],
+];
+// Units we SI-scale; phase (deg/rad) and dimensionless D/Q are left alone.
+const SCALABLE = new Set(["F", "H", "Ω", "S", "V", "A", "W"]);
+
+// Pick the prefix that puts the largest value in the [1, 1000) range.
+function siPrefix(maxAbs) {
+  if (!isFinite(maxAbs) || maxAbs <= 0) return [1, ""];
+  for (const [factor, p] of SI_PREFIXES) if (maxAbs >= factor) return [factor, p];
+  return [1e-12, "p"];  // smaller than pico -> still express in pico
+}
+
+// "Cp (F)" -> {name:"Cp", unit:"F"};  "D" -> {name:"D", unit:""}
+function splitUnit(label) {
+  const m = /^(.*?)\\s*\\(([^)]*)\\)\\s*$/.exec(label);
+  return m ? { name: m[1], unit: m[2] } : { name: label, unit: "" };
+}
+
+function fillColumns() {
+  const sel = $("column"), prev = sel.value;
+  sel.innerHTML = "";
+  if (!plotData) return;
+  for (const [val, lab] of [["primary", plotData.primary_label],
+                            ["secondary", plotData.secondary_label]]) {
+    const o = document.createElement("option");
+    o.value = val; o.textContent = lab;
+    sel.appendChild(o);
+  }
+  if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+}
+
+function ticksLog(lo, hi) {
+  const t = [];
+  for (let e = Math.floor(Math.log10(lo)); e <= Math.ceil(Math.log10(hi)); e++) {
+    const v = Math.pow(10, e);
+    if (v >= lo * 0.999 && v <= hi * 1.001) t.push(v);
+  }
+  return t.length < 2 ? [lo, hi] : t;
+}
+
+function ticksLin(lo, hi, n = 5) {
+  if (lo === hi) return [lo];
+  const t = [];
+  for (let k = 0; k <= n; k++) t.push(lo + (hi - lo) * k / n);
+  return t;
+}
+
+async function loadPlot() {
+  try {
+    const r = await fetch("api/plot");
+    plotData = (await r.json()).plot;
+  } catch (_) { plotData = null; }
+  fillColumns();
+  drawPlot();
+}
+
+// Value used in the dataset dropdown for the live, in-memory sweep.
+const CURRENT = "__current__";
+
+async function refreshDatasets(announce = false) {
+  const dir = $("folder").value.trim();
+  let info = { datasets: [], has_current: false };
+  try {
+    info = await (await fetch("api/datasets?dir=" + encodeURIComponent(dir))).json();
+  } catch (_) {}
+  const sel = $("dataset"), prev = sel.value;
+  sel.innerHTML = "";
+  if (info.has_current) {
+    const o = document.createElement("option");
+    o.value = CURRENT; o.textContent = "Current sweep";
+    sel.appendChild(o);
+  }
+  for (const name of (info.datasets || [])) {
+    const o = document.createElement("option");
+    o.value = name; o.textContent = name;
+    sel.appendChild(o);
+  }
+  if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+  if (announce) {
+    const n = (info.datasets || []).length;
+    const where = info.dir || dir;
+    writeLine(info.exists === false
+      ? `Folder not found: ${where}`
+      : `Scanned ${where}: ${n} dataset(s).`);
+  }
+}
+
+async function selectDataset() {
+  const v = $("dataset").value;
+  if (v === CURRENT) { await loadPlot(); return; }
+  if (!v) { plotData = null; fillColumns(); drawPlot(); return; }
+  const dir = $("folder").value.trim();
+  try {
+    const r = await fetch("api/dataset?name=" + encodeURIComponent(v) +
+                          "&dir=" + encodeURIComponent(dir));
+    plotData = (await r.json()).plot;
+  } catch (_) { plotData = null; }
+  fillColumns();
+  drawPlot();
+}
+
+// After a run: rescan files, then show the just-collected (current) sweep.
+async function showCurrent() {
+  await refreshDatasets();
+  if ([...$("dataset").options].some(o => o.value === CURRENT))
+    $("dataset").value = CURRENT;
+  await selectDataset();
+}
+
+function drawPlot() {
+  const cv = $("plot"), ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height;
+  const ink = getComputedStyle(cv).color || "#000";
+  const accent = "#2f81f7";
+  ctx.clearRect(0, 0, W, H);
+  ctx.font = "12px system-ui, sans-serif";
+  ctx.textBaseline = "middle";
+
+  const note = msg => {
+    ctx.fillStyle = ink; ctx.globalAlpha = .6; ctx.textAlign = "left";
+    ctx.fillText(msg, 16, 24); ctx.globalAlpha = 1;
+  };
+  if (!plotData || !plotData.freq || !plotData.freq.length)
+    return note("No sweep data yet - run a sweep to plot.");
+
+  const col = $("column").value || "primary";
+  const ys = plotData[col] || [];
+  const ylabel = col === "primary" ? plotData.primary_label : plotData.secondary_label;
+  const xlog = $("xscale").value === "log";
+  const ylog = $("yscale").value === "log";
+
+  const pts = [];
+  for (let k = 0; k < plotData.freq.length; k++) {
+    const x = plotData.freq[k], y = ys[k];
+    if (y === null || y === undefined || !isFinite(y)) continue;
+    if (xlog && x <= 0) continue;
+    if (ylog && y <= 0) continue;
+    pts.push({ x, y });
+  }
+  if (!pts.length) return note("No plottable points for this column/scale.");
+
+  const L = 66, R = W - 16, T = 16, B = H - 38;
+  const xs = pts.map(p => p.x), yv = pts.map(p => p.y);
+  const xlo = Math.min(...xs), xhi = Math.max(...xs);
+  const ylo = Math.min(...yv), yhi = Math.max(...yv);
+  const fx = v => xlog ? Math.log10(v) : v;
+  const fy = v => ylog ? Math.log10(v) : v;
+
+  let xmn = fx(xlo), xmx = fx(xhi), ymn = fy(ylo), ymx = fy(yhi);
+  if (xmn === xmx) { xmn -= 1; xmx += 1; }
+  if (ymn === ymx) { ymn -= 1; ymx += 1; }
+  else if (!ylog) { const pad = (ymx - ymn) * 0.06; ymn -= pad; ymx += pad; }
+
+  const sx = v => L + (fx(v) - xmn) / (xmx - xmn) * (R - L);
+  const sy = v => B - (fy(v) - ymn) / (ymx - ymn) * (B - T);
+
+  // SI-prefix the Y axis: one prefix for the whole axis from the data's
+  // magnitude (e.g. ~1e-7 F -> "n"), so ticks read "123" on a "Cp (nF)" axis
+  // rather than "1.2e-7". Only for units with an SI base (F/H/Ω/S/...).
+  const { name: yName, unit: yUnit } = splitUnit(ylabel);
+  let yFactor = 1, yUnitLabel = ylabel;
+  if (SCALABLE.has(yUnit)) {
+    const mags = pts.map(p => Math.abs(p.y)).filter(v => isFinite(v) && v > 0);
+    const [factor, prefix] = siPrefix(mags.length ? Math.max(...mags) : 0);
+    yFactor = factor;
+    yUnitLabel = `${yName} (${prefix}${yUnit})`;
+  }
+
+  // Gridlines + tick labels.
+  ctx.strokeStyle = ink; ctx.fillStyle = ink; ctx.lineWidth = 1;
+  ctx.textAlign = "center";
+  for (const xt of (xlog ? ticksLog(xlo, xhi) : ticksLin(xlo, xhi))) {
+    const px = sx(xt);
+    ctx.globalAlpha = .12; ctx.beginPath(); ctx.moveTo(px, T); ctx.lineTo(px, B); ctx.stroke();
+    ctx.globalAlpha = .8; ctx.fillText(fmtNum(xt), px, B + 14);
+  }
+  ctx.textAlign = "right";
+  for (const yt of (ylog ? ticksLog(ylo, yhi) : ticksLin(ylo, yhi))) {
+    const py = sy(yt);
+    ctx.globalAlpha = .12; ctx.beginPath(); ctx.moveTo(L, py); ctx.lineTo(R, py); ctx.stroke();
+    ctx.globalAlpha = .8; ctx.fillText(fmtNum(yt / yFactor), L - 6, py);
+  }
+  ctx.globalAlpha = 1;
+
+  // Frame + axis titles.
+  ctx.globalAlpha = .5; ctx.strokeRect(L, T, R - L, B - T); ctx.globalAlpha = 1;
+  // "log " prefix (not a " (log)" suffix) so it doesn't collide with the
+  // unit already in the label, e.g. "log Cp (F)" rather than "Cp (F) (log)".
+  ctx.textAlign = "center";
+  ctx.fillText((xlog ? "log " : "") + "Frequency (Hz)", (L + R) / 2, H - 8);
+  ctx.save();
+  ctx.translate(14, (T + B) / 2); ctx.rotate(-Math.PI / 2);
+  ctx.fillText((ylog ? "log " : "") + yUnitLabel, 0, 0);
+  ctx.restore();
+
+  // Data line + point markers.
+  ctx.strokeStyle = accent; ctx.fillStyle = accent; ctx.lineWidth = 2;
+  ctx.beginPath();
+  pts.forEach((p, k) => { const X = sx(p.x), Y = sy(p.y); k ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y); });
+  ctx.stroke();
+  for (const p of pts) { ctx.beginPath(); ctx.arc(sx(p.x), sy(p.y), 2.5, 0, Math.PI * 2); ctx.fill(); }
+}
+
 $("refresh").onclick = refreshPorts;
 $("run").onclick = run;
 $("cancel").onclick = cancel;
 for (const id of ["name", "author", "desc", "func"])
   $(id).addEventListener("input", schedulePreview);
+for (const id of ["column", "xscale", "yscale"])
+  $(id).addEventListener("change", drawPlot);
+$("dataset").onchange = selectDataset;
+$("scan").onclick = async () => { await refreshDatasets(true); await selectDataset(); };
+$("folder").addEventListener("keydown", e => { if (e.key === "Enter") $("scan").click(); });
 
 refreshPorts();
 refreshPreview();
+refreshDatasets().then(selectDataset);
 </script>
 </body>
 </html>
@@ -442,6 +806,26 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ports": ports})
         elif path == "/api/status":
             self._json(STATE.snapshot())
+        elif path == "/api/plot":
+            with STATE.lock:
+                plot = STATE.plot
+            self._json({"plot": plot})
+        elif path == "/api/datasets":
+            folder = (parse_qs(urlparse(self.path).query).get("dir") or [""])[0]
+            with STATE.lock:
+                has_current = STATE.plot is not None
+            base = dataset_dir(folder)
+            self._json({
+                "datasets": list_datasets(folder),
+                "has_current": has_current,
+                "dir": str(base),
+                "exists": base.is_dir(),
+            })
+        elif path == "/api/dataset":
+            qs = parse_qs(urlparse(self.path).query)
+            name = (qs.get("name") or [""])[0]
+            folder = (qs.get("dir") or [""])[0]
+            self._json({"plot": load_dataset(name, folder)})
         else:
             self.send_error(404)
 

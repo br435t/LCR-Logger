@@ -65,7 +65,7 @@ If you continue this work, `git checkout Front-End` and go.
 - ~~No automatic measurement-function setup (`FUNC:IMP`).~~ Done via `--func` (still opt-in; default behaviour is unchanged).
 - No `TRIG:SOUR BUS` write (see issue #1).
 - No `*RST` at startup — meter state carries over between runs.
-- ~~No GUI~~ — `LCR_gui.py` is a browser-based front end for the sweep + save flow (pre-fill metadata, live JSON preview, threaded run). It serves a page from the stdlib `http.server` on `127.0.0.1` rather than using Tkinter, which is not installed on the target machine (no `python3-tk`, no admin rights). No plotting yet; sweep output is still text/CSV/JSON only, and the GUI covers sweep only (no live-stream view).
+- ~~No GUI~~ — `LCR_gui.py` is a browser-based front end for the sweep + save flow (pre-fill metadata, live JSON preview, threaded run). It serves a page from the stdlib `http.server` on `127.0.0.1` rather than using Tkinter, which is not installed on the target machine (no `python3-tk`, no admin rights). ~~No plotting yet~~ — it now includes a *Visualizer* (`/api/plot` + a vanilla-`<canvas>` plot of frequency vs the selected measured column, log/linear toggles). The GUI still covers sweep only (no live-stream view).
 - No LAN/Ethernet transport (would need raw TCP to port 5025).
 - The status byte and bin number are not surfaced to the user — they're either dropped or printed raw.
 

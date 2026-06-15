@@ -83,7 +83,7 @@ The `.json` sidecar records the run's provenance:
   "test_time": "2026-06-15T10:30:00",
   "author": "B. Tester",
   "description": "Cap bank unit 3, 1uF film cap",
-  "measurement": "R-X"
+  "measurement": "R (Ω)-X (Ω)"
 }
 ```
 
@@ -102,6 +102,10 @@ It starts a tiny local web server (Python's built-in `http.server`, nothing to i
 1. Pick the **port** (Refresh rescans), **baud**, and optional measurement **function**.
 2. Pre-fill the **filename**, **author**, and **description**. A live **JSON preview** shows exactly what the `.json` sidecar will contain before you commit.
 3. Click **Run sweep & save** — the sweep runs on a background thread (the page stays responsive), each point streams into the progress pane, and the `.txt`/`.csv`/`.json` files are written to `data/`. **Cancel** stops after the current point without saving.
+4. **Visualize** the result: the *Visualizer* pane plots frequency (X) against either measured column (Y).
+   - **Folder** — the directory to scan for saved `.csv` datasets (defaults to `data`; type any path and click **Scan**, or press Enter). Since the UI runs on the same machine as the server, this is a path on that machine (e.g. `data`, `Example_data`, or an absolute path).
+   - **Dataset** — what to plot: "Current sweep" (the most recent run, including a partial one if you cancelled) or any saved sweep found in the selected folder, parsed from its `.csv`.
+   - Pick the **Column** and toggle **log/linear** on each axis. Drawn with a plain `<canvas>` — no plotting library to install.
 
 The page is served on loopback only (`127.0.0.1`), so it is not reachable from other machines. Press **Ctrl+C** in the terminal to stop the server when you're done.
 

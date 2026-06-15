@@ -123,30 +123,34 @@ SERIAL_TIMEOUT_S = 2.0
 LOG_FILE = "LCR_logging.log"
 
 # Map each FUNCtion:IMPedance code to its (primary, secondary) parameter
-# labels, so output headers read "R"/"X" or "Cp"/"D" instead of generic
-# "Primary"/"Secondary". Source: 894/895 programming manual, the
-# FUNCtion:IMPedance selection table.
+# labels, with units in parentheses, so output headers and plot axes read
+# "R (Ω)"/"X (Ω)" or "Cp (F)"/"D" instead of generic "Primary"/"Secondary".
+# Units by parameter: capacitance Cp/Cs -> F (farad); inductance Lp/Ls -> H
+# (henry); resistance/reactance/impedance R/Rp/Rs/X/Z -> Ω (ohm); conductance/
+# susceptance/admittance G/B/Y -> S (siemens); phase theta -> deg or rad. The
+# dissipation factor D and quality factor Q are dimensionless, so they carry no
+# unit. Source: 894/895 programming manual, the FUNCtion:IMPedance table.
 IMP_FUNCTIONS: dict[str, tuple[str, str]] = {
-    "CPD":  ("Cp", "D"),
-    "CPQ":  ("Cp", "Q"),
-    "CPG":  ("Cp", "G"),
-    "CPRP": ("Cp", "Rp"),
-    "CSD":  ("Cs", "D"),
-    "CSQ":  ("Cs", "Q"),
-    "CSRS": ("Cs", "Rs"),
-    "LPD":  ("Lp", "D"),
-    "LPQ":  ("Lp", "Q"),
-    "LPG":  ("Lp", "G"),
-    "LPRP": ("Lp", "Rp"),
-    "LSD":  ("Ls", "D"),
-    "LSQ":  ("Ls", "Q"),
-    "LSRS": ("Ls", "Rs"),
-    "RX":   ("R", "X"),
-    "ZTD":  ("Z", "theta (deg)"),
-    "ZTR":  ("Z", "theta (rad)"),
-    "GB":   ("G", "B"),
-    "YTD":  ("Y", "theta (deg)"),
-    "YTR":  ("Y", "theta (rad)"),
+    "CPD":  ("Cp (F)", "D"),
+    "CPQ":  ("Cp (F)", "Q"),
+    "CPG":  ("Cp (F)", "G (S)"),
+    "CPRP": ("Cp (F)", "Rp (Ω)"),
+    "CSD":  ("Cs (F)", "D"),
+    "CSQ":  ("Cs (F)", "Q"),
+    "CSRS": ("Cs (F)", "Rs (Ω)"),
+    "LPD":  ("Lp (H)", "D"),
+    "LPQ":  ("Lp (H)", "Q"),
+    "LPG":  ("Lp (H)", "G (S)"),
+    "LPRP": ("Lp (H)", "Rp (Ω)"),
+    "LSD":  ("Ls (H)", "D"),
+    "LSQ":  ("Ls (H)", "Q"),
+    "LSRS": ("Ls (H)", "Rs (Ω)"),
+    "RX":   ("R (Ω)", "X (Ω)"),
+    "ZTD":  ("Z (Ω)", "theta (deg)"),
+    "ZTR":  ("Z (Ω)", "theta (rad)"),
+    "GB":   ("G (S)", "B (S)"),
+    "YTD":  ("Y (S)", "theta (deg)"),
+    "YTR":  ("Y (S)", "theta (rad)"),
 }
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -162,13 +166,27 @@ def _setup_logging() -> None:
 
     Both handlers share the same format so log lines are identical in both
     destinations.
+
+    Measurement labels can contain non-ASCII unit symbols (e.g. the Ω in
+    "Rs (Ω)"). A default Windows console is cp1252 and would raise
+    UnicodeEncodeError on those, so the console stream is reconfigured to UTF-8
+    (replacing any glyph the terminal still can't draw). The file handler is
+    already UTF-8.
     """
+    console = logging.StreamHandler()
+    reconfigure = getattr(console.stream, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
     fmt = "%(asctime)s [%(levelname)s] %(message)s"
     logging.basicConfig(
         level=logging.INFO,
         format=fmt,
         handlers=[
-            logging.StreamHandler(),
+            console,
             logging.FileHandler(LOG_FILE, encoding="utf-8"),
         ],
     )
