@@ -1,0 +1,10 @@
+# LCR Logger measurement tags -- one per line as a YAML list.
+# Edit by hand or add new tags from the GUI/CLI before a sweep.
+
+- "baseline"
+- "calibration"
+- "capacitor"
+- "inductor"
+- "open"
+- "resistor"
+- "short"
