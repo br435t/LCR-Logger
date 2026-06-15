@@ -3,5 +3,9 @@
   "test_time": "2026-06-15T09:38:39",
   "author": "Author1",
   "description": "Decription1",
-  "measurement": "Ls (H)-Rs (\u03a9)"
+  "measurement": "Ls (H)-Rs (\u03a9)",
+  "tags": [
+    "short",
+    "plated"
+  ]
 }

@@ -107,7 +107,10 @@ def measurement_label(func: str) -> str:
     return "(read from meter at run time)"
 
 
-def build_preview(name: str, author: str, description: str, func: str) -> dict:
+def build_preview(
+    name: str, author: str, description: str, func: str,
+    tags: list[str] | None = None,
+) -> dict:
     """The JSON sidecar that *will* be written, from the current field values."""
     stem = Path(name).with_suffix("") if name else Path("<filename>")
     csv_path = lcr.DATA_DIR / stem.with_suffix(".csv")
@@ -117,6 +120,7 @@ def build_preview(name: str, author: str, description: str, func: str) -> dict:
         "author": author.strip(),
         "description": description.strip(),
         "measurement": measurement_label(func),
+        "tags": list(tags or []),
     }
 
 
@@ -211,6 +215,29 @@ def load_dataset(name: str, folder: str = "") -> dict | None:
     }
 
 
+def dataset_tags(name: str, folder: str = "") -> list[str]:
+    """
+    Tags recorded in a dataset's JSON sidecar (the `tags` field save_sweep
+    writes), used to filter the visualizer's dataset list. Returns an empty list
+    if the sidecar is missing, unreadable, or carries no tags. Like load_dataset,
+    only a bare filename within `folder` is accepted.
+    """
+    json_path = dataset_dir(folder) / f"{Path(name).name}.json"
+    if not json_path.is_file():
+        return []
+    try:
+        meta = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    tags = meta.get("tags", []) if isinstance(meta, dict) else []
+    return [str(t) for t in tags] if isinstance(tags, list) else []
+
+
+def datasets_with_tags(folder: str = "") -> dict[str, list[str]]:
+    """Map each dataset stem in `folder` to its sidecar tags (sorted by name)."""
+    return {name: dataset_tags(name, folder) for name in list_datasets(folder)}
+
+
 # ── Sweep worker (mirrors the old _run_worker) ───────────────────────────────
 
 def run_sweep_worker(params: dict) -> None:
@@ -248,7 +275,7 @@ def run_sweep_worker(params: dict) -> None:
 
         paths = lcr.save_sweep(
             rows, params["name"], params["author"], params["description"],
-            primary, secondary, test_time,
+            primary, secondary, test_time, tags=params["tags"],
         )
         resolved = [str(p.resolve()) for p in paths]
         with STATE.lock:
@@ -288,6 +315,7 @@ def start_sweep(params: dict) -> dict:
         return {"error": f"Baud must be a number, got {params.get('baud')!r}."}
 
     func = params.get("func") or FUNC_KEEP
+    tags = [str(t).strip() for t in (params.get("tags") or []) if str(t).strip()]
     run = {
         "port": port,
         "baud": baud,
@@ -295,6 +323,7 @@ def start_sweep(params: dict) -> dict:
         "name": name,
         "author": (params.get("author") or "").strip(),
         "description": (params.get("description") or "").strip(),
+        "tags": tags,
     }
 
     with STATE.lock:
@@ -332,6 +361,7 @@ PAGE = """<!doctype html>
                      padding: 1px 0; }
   .checklist input { width: auto; margin: 0 6px 0 0; }
   .checklist .empty { opacity: .6; }
+  .checklist .tagnote { opacity: .55; margin-left: 6px; font-size: 12px; }
   input, select, button { font: inherit; padding: 5px 7px; border-radius: 6px;
           border: 1px solid #8886; background: Field; color: FieldText; }
   input, select { width: 100%; box-sizing: border-box; }
@@ -385,6 +415,16 @@ PAGE = """<!doctype html>
     <label for="desc">Description</label>
     <input id="desc"><span></span>
   </div>
+  <div class="row">
+    <label>Tags</label>
+    <div id="tags" class="checklist"></div>
+    <span class="hint">Tick tags to attach to this run</span>
+  </div>
+  <div class="row">
+    <label for="newtag">Add tag</label>
+    <input id="newtag" placeholder="new tag name, then Add">
+    <button id="addtag" type="button">Add</button>
+  </div>
 </fieldset>
 
 <fieldset>
@@ -409,6 +449,19 @@ PAGE = """<!doctype html>
     <label for="folder">Folder</label>
     <input id="folder" value="data" placeholder="folder to scan for .csv datasets">
     <button id="scan" type="button">Scan</button>
+  </div>
+  <div class="row">
+    <label>Filter tags</label>
+    <div id="tagfilter" class="checklist"></div>
+    <span class="hint">Show only datasets with these tags</span>
+  </div>
+  <div class="row">
+    <label for="tagmatch">Match</label>
+    <select id="tagmatch">
+      <option value="any" selected>any selected tag</option>
+      <option value="all">all selected tags</option>
+    </select>
+    <span></span>
   </div>
   <div class="row">
     <label>Datasets</label>
@@ -472,6 +525,7 @@ async function refreshPreview() {
   const body = {
     name: $("name").value, author: $("author").value,
     description: $("desc").value, func: $("func").value,
+    tags: checkedTags(),
   };
   const r = await fetch("api/preview", {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -484,6 +538,50 @@ let previewTimer = null;
 function schedulePreview() {
   clearTimeout(previewTimer);
   previewTimer = setTimeout(refreshPreview, 150);
+}
+
+// ── Tags ─────────────────────────────────────────────────────
+// Tags are checkboxes built from the server's YAML list; new ones can be added
+// at runtime, which persists them server-side and ticks them for this run.
+function checkedTags() {
+  return [...$("tags").querySelectorAll("input:checked")].map(c => c.value);
+}
+
+async function refreshTags() {
+  let tags = [];
+  try { tags = (await (await fetch("api/tags")).json()).tags || []; } catch (_) {}
+  const box = $("tags");
+  const prev = new Set(checkedTags());  // keep ticks across a refresh
+  box.innerHTML = "";
+  for (const name of tags) {
+    const lab = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.value = name; cb.checked = prev.has(name);
+    lab.appendChild(cb);
+    lab.appendChild(document.createTextNode(name));
+    box.appendChild(lab);
+  }
+  if (!box.children.length) {
+    const span = document.createElement("span");
+    span.className = "empty"; span.textContent = "No tags yet - add one below.";
+    box.appendChild(span);
+  }
+}
+
+async function addTag() {
+  const input = $("newtag"), tag = input.value.trim();
+  if (!tag) return;
+  try {
+    await fetch("api/tags", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tag }),
+    });
+  } catch (_) {}
+  input.value = "";
+  await refreshTags();
+  for (const cb of $("tags").querySelectorAll("input"))
+    if (cb.value === tag) cb.checked = true;  // tick the just-added tag
+  refreshPreview();
 }
 
 function setRunning(running) {
@@ -516,6 +614,7 @@ async function run() {
   const body = {
     port: $("port").value, baud: $("baud").value, func: $("func").value,
     name: $("name").value, author: $("author").value, description: $("desc").value,
+    tags: checkedTags(),
   };
   const r = await fetch("api/start", {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -669,41 +768,100 @@ async function fetchSeries(value) {
   }
 }
 
+// Latest /api/datasets response, kept so the tag filter can re-render the
+// dataset list without re-fetching.
+let datasetInfo = { datasets: [], tags_by_dataset: {}, all_tags: [], has_current: false };
+
 // Values of the currently ticked dataset checkboxes.
 function checkedDatasets() {
   return [...$("dataset").querySelectorAll("input:checked")].map(c => c.value);
 }
 
+// Values of the currently ticked filter-tag checkboxes.
+function filterTags() {
+  return [...$("tagfilter").querySelectorAll("input:checked")].map(c => c.value);
+}
+
+// Does a dataset's tags satisfy the current filter? Empty filter -> always.
+// "all" requires every ticked tag; "any" requires at least one.
+function passesFilter(tags) {
+  const sel = filterTags();
+  if (!sel.length) return true;
+  return $("tagmatch").value === "all"
+    ? sel.every(t => tags.includes(t))
+    : sel.some(t => tags.includes(t));
+}
+
 async function refreshDatasets(announce = false) {
   const dir = $("folder").value.trim();
-  let info = { datasets: [], has_current: false };
+  let info = { datasets: [], tags_by_dataset: {}, all_tags: [], has_current: false };
   try {
     info = await (await fetch("api/datasets?dir=" + encodeURIComponent(dir))).json();
   } catch (_) {}
-  const box = $("dataset");
-  const prev = new Set(checkedDatasets());  // keep ticks across a rescan
-  box.innerHTML = "";
-  const add = (value, text) => {
+  datasetInfo = info;
+
+  // Rebuild the filter-tag checklist from the union of tags across datasets,
+  // keeping any filter tags already ticked.
+  const tf = $("tagfilter");
+  const prevFilter = new Set(filterTags());
+  tf.innerHTML = "";
+  for (const name of (info.all_tags || [])) {
     const lab = document.createElement("label");
     const cb = document.createElement("input");
-    cb.type = "checkbox"; cb.value = value; cb.checked = prev.has(value);
+    cb.type = "checkbox"; cb.value = name; cb.checked = prevFilter.has(name);
     lab.appendChild(cb);
-    lab.appendChild(document.createTextNode(text));
-    box.appendChild(lab);
-  };
-  if (info.has_current) add(CURRENT, "Current sweep");
-  for (const name of (info.datasets || [])) add(name, name);
-  if (!box.children.length) {
-    const span = document.createElement("span");
-    span.className = "empty"; span.textContent = "No datasets found.";
-    box.appendChild(span);
+    lab.appendChild(document.createTextNode(name));
+    tf.appendChild(lab);
   }
+  if (!tf.children.length) {
+    const span = document.createElement("span");
+    span.className = "empty"; span.textContent = "No tags on these datasets.";
+    tf.appendChild(span);
+  }
+
+  renderDatasets();
+
   if (announce) {
     const n = (info.datasets || []).length;
     const where = info.dir || dir;
     writeLine(info.exists === false
       ? `Folder not found: ${where}`
       : `Scanned ${where}: ${n} dataset(s).`);
+  }
+}
+
+// Build the dataset checklist from datasetInfo, applying the tag filter. Each
+// dataset shows its tags after the name. Ticks are kept for datasets that stay
+// visible; "Current sweep" is always shown (it has no saved sidecar to filter).
+function renderDatasets() {
+  const box = $("dataset");
+  const prev = new Set(checkedDatasets());
+  box.innerHTML = "";
+  const add = (value, text, tags) => {
+    const lab = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.value = value; cb.checked = prev.has(value);
+    lab.appendChild(cb);
+    lab.appendChild(document.createTextNode(text));
+    if (tags && tags.length) {
+      const note = document.createElement("span");
+      note.className = "tagnote"; note.textContent = "(" + tags.join(", ") + ")";
+      lab.appendChild(note);
+    }
+    box.appendChild(lab);
+  };
+  if (datasetInfo.has_current) add(CURRENT, "Current sweep");
+  for (const name of (datasetInfo.datasets || [])) {
+    const tags = datasetInfo.tags_by_dataset[name] || [];
+    if (passesFilter(tags)) add(name, name, tags);
+  }
+  if (!box.children.length) {
+    const span = document.createElement("span");
+    span.className = "empty";
+    span.textContent = (datasetInfo.datasets || []).length
+      ? "No datasets match the tag filter."
+      : "No datasets found.";
+    box.appendChild(span);
   }
 }
 
@@ -904,13 +1062,21 @@ $("run").onclick = run;
 $("cancel").onclick = cancel;
 for (const id of ["name", "author", "desc", "func"])
   $(id).addEventListener("input", schedulePreview);
+$("tags").addEventListener("change", schedulePreview);
+$("addtag").onclick = addTag;
+$("newtag").addEventListener("keydown", e => { if (e.key === "Enter") addTag(); });
 for (const id of ["column", "xscale", "yscale"])
   $(id).addEventListener("change", drawPlot);
 $("dataset").onchange = selectDatasets;
+// Changing the tag filter re-renders the (filtered) dataset list, then redraws
+// so any datasets hidden by the filter drop out of the overlay.
+for (const id of ["tagfilter", "tagmatch"])
+  $(id).addEventListener("change", () => { renderDatasets(); selectDatasets(); });
 $("scan").onclick = async () => { await refreshDatasets(true); await selectDatasets(); };
 $("folder").addEventListener("keydown", e => { if (e.key === "Enter") $("scan").click(); });
 
 refreshPorts();
+refreshTags();
 refreshPreview();
 refreshDatasets().then(selectDatasets);
 </script>
@@ -969,6 +1135,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ports": ports})
         elif path == "/api/status":
             self._json(STATE.snapshot())
+        elif path == "/api/tags":
+            self._json({"tags": lcr.load_tags()})
         elif path == "/api/plot":
             with STATE.lock:
                 plot = STATE.plot
@@ -978,8 +1146,12 @@ class Handler(BaseHTTPRequestHandler):
             with STATE.lock:
                 has_current = STATE.plot is not None
             base = dataset_dir(folder)
+            by_tag = datasets_with_tags(folder)
+            all_tags = sorted({t for ts in by_tag.values() for t in ts}, key=str.lower)
             self._json({
-                "datasets": list_datasets(folder),
+                "datasets": list(by_tag),
+                "tags_by_dataset": by_tag,
+                "all_tags": all_tags,
                 "has_current": has_current,
                 "dir": str(base),
                 "exists": base.is_dir(),
@@ -999,10 +1171,14 @@ class Handler(BaseHTTPRequestHandler):
             preview = build_preview(
                 body.get("name", ""), body.get("author", ""),
                 body.get("description", ""), body.get("func", FUNC_KEEP),
+                body.get("tags") or [],
             )
             self._send(json.dumps(preview, indent=2).encode("utf-8"))
         elif path == "/api/start":
             self._json(start_sweep(self._read_body()))
+        elif path == "/api/tags":
+            body = self._read_body()
+            self._json({"tags": lcr.add_tag(str(body.get("tag", "")))})
         elif path == "/api/cancel":
             if STATE.is_running():
                 STATE.stop_event.set()

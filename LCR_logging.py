@@ -122,6 +122,13 @@ SERIAL_TIMEOUT_S = 2.0
 # Log file written to the working directory.
 LOG_FILE = "LCR_logging.log"
 
+# User-selectable measurement tags live here (working directory) as a simple
+# YAML list of strings. Kept dependency-free (no PyYAML): the load/save helpers
+# below parse and emit the flat-list format themselves, because adding a pip
+# dependency is painful on this machine (corporate SSL inspection -- see
+# HANDOFF.md "Environment quirks"). The file is created on first add.
+TAGS_FILE = Path("tags.yaml")
+
 # Map each FUNCtion:IMPedance code to its (primary, secondary) parameter
 # labels, with units in parentheses, so output headers and plot axes read
 # "R (Ω)"/"X (Ω)" or "Cp (F)"/"D" instead of generic "Primary"/"Secondary".
@@ -405,6 +412,83 @@ def get_measurement_labels(ser: serial.Serial) -> tuple[str, str]:
     return primary, secondary
 
 
+# ── Tags ──────────────────────────────────────────────────────────────────────
+
+def _parse_yaml_tag(text: str) -> str:
+    """
+    Turn one YAML list item's value into a plain string, handling the three
+    forms our writer (and a human editing the file) might produce: a bare
+    scalar, a "double-quoted" scalar (JSON-style escaping), or a 'single-quoted'
+    one ('' is an escaped quote). Anything we can't parse is taken literally.
+    """
+    text = text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        if text[0] == '"':
+            try:
+                return json.loads(text)
+            except ValueError:
+                pass
+        else:
+            return text[1:-1].replace("''", "'")
+    return text
+
+
+def load_tags(path: Path = TAGS_FILE) -> list[str]:
+    """
+    Read the YAML tag list, returning unique tags in file order. Missing or
+    unreadable file -> empty list (tags are optional). Blank lines and
+    "# comments" are skipped; each remaining "- value" line yields one tag.
+    """
+    if not path.is_file():
+        return []
+    tags: list[str] = []
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("-"):
+                line = line[1:]
+            tag = _parse_yaml_tag(line)
+            if tag and tag not in tags:
+                tags.append(tag)
+    except OSError as exc:
+        log.warning("Could not read tags from %s: %s", path, exc)
+        return []
+    return tags
+
+
+def save_tags(tags: list[str], path: Path = TAGS_FILE) -> None:
+    """
+    Write the tag list back as a flat YAML sequence. Each value is emitted with
+    json.dumps -- a double-quoted scalar that is valid YAML and round-trips any
+    punctuation/Unicode safely (so e.g. a tag with a colon won't corrupt the
+    file). A header comment documents the format for anyone editing by hand.
+    """
+    lines = [
+        "# LCR Logger measurement tags -- one per line as a YAML list.",
+        "# Edit by hand or add new tags from the GUI/CLI before a sweep.",
+        "",
+    ]
+    lines += [f"- {json.dumps(tag, ensure_ascii=False)}" for tag in tags]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def add_tag(tag: str, path: Path = TAGS_FILE) -> list[str]:
+    """
+    Add a tag to the list (creating the file if needed) and return the updated,
+    case-insensitively sorted list. A blank or duplicate tag is a no-op. This is
+    how new tags get persisted "at runtime" from either front end.
+    """
+    tag = tag.strip()
+    tags = load_tags(path)
+    if tag and tag not in tags:
+        tags.append(tag)
+        tags.sort(key=str.lower)
+        save_tags(tags, path)
+    return tags
+
+
 # ── Sweep result saving ───────────────────────────────────────────────────────
 
 def save_sweep(
@@ -415,6 +499,7 @@ def save_sweep(
     primary_label: str = "Primary",
     secondary_label: str = "Secondary",
     test_time: datetime | None = None,
+    tags: list[str] | None = None,
 ) -> tuple[Path, Path, Path]:
     """
     Write sweep results to the data folder. No prompting -- all metadata is
@@ -433,6 +518,8 @@ def save_sweep(
         secondary_label: Header for the secondary parameter column (e.g. "X", "D").
         test_time: When the sweep was run, recorded in the JSON sidecar. Defaults
               to the current time if not supplied.
+        tags: Optional list of user-selected tags, recorded in the JSON sidecar
+              for cataloguing/filtering. Defaults to an empty list.
 
     Returns:
         (txt_path, csv_path, json_path) -- the three files written. DATA_DIR is
@@ -480,6 +567,7 @@ def save_sweep(
         "author": author,
         "description": description,
         "measurement": f"{primary_label}-{secondary_label}",
+        "tags": list(tags or []),
     }
     with json_path.open("w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
@@ -510,8 +598,31 @@ def prompt_and_save(
 
     author      = input("Data author (optional): ").strip()
     description = input("Description (optional): ").strip()
+    tags        = prompt_for_tags()
 
-    save_sweep(rows, name, author, description, primary_label, secondary_label, test_time)
+    save_sweep(
+        rows, name, author, description, primary_label, secondary_label,
+        test_time, tags=tags,
+    )
+
+
+def prompt_for_tags() -> list[str]:
+    """
+    Prompt for comma-separated tags, showing any already defined in TAGS_FILE.
+    Any tag the user types that isn't already known is persisted to the YAML so
+    it's offered next time -- this is the CLI's "add new tags at runtime" path.
+    Press Enter to attach no tags.
+    """
+    available = load_tags()
+    if available:
+        print("Available tags: " + ", ".join(available))
+    entry = input("Tags (comma-separated, optional): ").strip()
+    if not entry:
+        return []
+    chosen = [t.strip() for t in entry.split(",") if t.strip()]
+    for tag in chosen:
+        add_tag(tag)
+    return chosen
 
 
 # ── Modes ─────────────────────────────────────────────────────────────────────
