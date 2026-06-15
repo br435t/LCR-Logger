@@ -325,6 +325,13 @@ PAGE = """<!doctype html>
   .row { display: grid; grid-template-columns: 110px 1fr auto; gap: 8px;
          align-items: center; margin: 6px 0; }
   label { text-align: right; }
+  .hint { font-size: 12px; opacity: .6; text-align: left; }
+  .checklist { border: 1px solid #8886; border-radius: 6px; padding: 6px 8px;
+               max-height: 120px; overflow: auto; background: Field; }
+  .checklist label { display: block; text-align: left; cursor: pointer;
+                     padding: 1px 0; }
+  .checklist input { width: auto; margin: 0 6px 0 0; }
+  .checklist .empty { opacity: .6; }
   input, select, button { font: inherit; padding: 5px 7px; border-radius: 6px;
           border: 1px solid #8886; background: Field; color: FieldText; }
   input, select { width: 100%; box-sizing: border-box; }
@@ -338,6 +345,11 @@ PAGE = """<!doctype html>
   canvas { width: 100%; max-width: 680px; height: auto; display: block;
            margin-top: 8px; border: 1px solid #8884; border-radius: 6px;
            background: #8881; }
+  .plotwrap { position: relative; }
+  #tip { position: absolute; display: none; pointer-events: none; z-index: 5;
+         background: Canvas; color: CanvasText; border: 1px solid #8888;
+         border-radius: 6px; padding: 4px 7px; white-space: pre;
+         font: 12px/1.3 system-ui, sans-serif; box-shadow: 0 2px 8px #0004; }
 </style>
 </head>
 <body>
@@ -399,9 +411,9 @@ PAGE = """<!doctype html>
     <button id="scan" type="button">Scan</button>
   </div>
   <div class="row">
-    <label for="dataset">Dataset</label>
-    <select id="dataset"></select>
-    <span></span>
+    <label>Datasets</label>
+    <div id="dataset" class="checklist"></div>
+    <span class="hint">Tick runs to overlay them</span>
   </div>
   <div class="row">
     <label for="column">Column (Y)</label>
@@ -424,7 +436,10 @@ PAGE = """<!doctype html>
     </select>
     <span></span>
   </div>
-  <canvas id="plot" width="680" height="360"></canvas>
+  <div class="plotwrap">
+    <canvas id="plot" width="680" height="360"></canvas>
+    <div id="tip"></div>
+  </div>
 </fieldset>
 
 <script>
@@ -521,13 +536,35 @@ async function cancel() {
 // ── Visualizer ───────────────────────────────────────────────
 // Plots frequency (X) against the selected measured column (Y) on a canvas.
 // Vanilla JS so there is nothing to load from a CDN -- keeps it offline.
-let plotData = null;
+// One entry per selected run, so multiple runs can overlay on the same axes:
+//   [{name, freq, primary, secondary, primary_label, secondary_label}, ...]
+let plotSeries = [];
+
+// Distinct line colours, cycled per overlaid run.
+const PALETTE = ["#2f81f7", "#e0533d", "#3fb950", "#bf6bd1",
+                 "#d29922", "#26a3a3", "#db61a2", "#8b949e"];
+
+// Screen positions of every drawn marker, rebuilt each drawPlot, so a mouseover
+// can map back to the exact data point: [{px, py, text}, ...].
+let hoverPts = [];
 
 function fmtNum(v) {
   if (v === 0) return "0";
   const a = Math.abs(v);
   if (a >= 1e4 || a < 1e-2) return v.toExponential(1);
   return (Math.round(v * 1000) / 1000).toString();
+}
+
+// Higher-precision formatter for the hover tooltip ("exact" readout), with
+// trailing zeros trimmed off the fixed-notation form.
+function fmtFull(v) {
+  if (!isFinite(v)) return String(v);
+  if (v === 0) return "0";
+  const a = Math.abs(v);
+  if (a >= 1e6 || a < 1e-3) return v.toExponential(4);
+  let s = v.toPrecision(6);
+  if (s.indexOf(".") >= 0) s = s.replace(/\\.?0+$/, "");
+  return s;
 }
 
 // SI prefixes for Y-axis scaling (engineering powers of 1000).
@@ -545,6 +582,14 @@ function siPrefix(maxAbs) {
   return [1e-12, "p"];  // smaller than pico -> still express in pico
 }
 
+// Format a value in its own SI-scaled unit, e.g. fmtSI(1234, "Hz") -> "1.234 kHz".
+// Dimensionless quantities (unit === "") are returned unscaled.
+function fmtSI(v, unit) {
+  if (!unit) return fmtFull(v);
+  const [factor, prefix] = siPrefix(Math.abs(v));
+  return fmtFull(v / factor) + " " + prefix + unit;
+}
+
 // "Cp (F)" -> {name:"Cp", unit:"F"};  "D" -> {name:"D", unit:""}
 function splitUnit(label) {
   const m = /^(.*?)\\s*\\(([^)]*)\\)\\s*$/.exec(label);
@@ -554,9 +599,10 @@ function splitUnit(label) {
 function fillColumns() {
   const sel = $("column"), prev = sel.value;
   sel.innerHTML = "";
-  if (!plotData) return;
-  for (const [val, lab] of [["primary", plotData.primary_label],
-                            ["secondary", plotData.secondary_label]]) {
+  if (!plotSeries.length) return;
+  const base = plotSeries[0];  // column labels come from the first selected run
+  for (const [val, lab] of [["primary", base.primary_label],
+                            ["secondary", base.secondary_label]]) {
     const o = document.createElement("option");
     o.value = val; o.textContent = lab;
     sel.appendChild(o);
@@ -580,17 +626,53 @@ function ticksLin(lo, hi, n = 5) {
   return t;
 }
 
-async function loadPlot() {
-  try {
-    const r = await fetch("api/plot");
-    plotData = (await r.json()).plot;
-  } catch (_) { plotData = null; }
-  fillColumns();
-  drawPlot();
+// Minor ticks (subticks) for a log axis: the 2..9 multipliers within each
+// decade that fall inside the visible range.
+function minorTicksLog(lo, hi) {
+  const t = [];
+  for (let e = Math.floor(Math.log10(lo)); e <= Math.ceil(Math.log10(hi)); e++) {
+    for (let m = 2; m <= 9; m++) {
+      const v = m * Math.pow(10, e);
+      if (v >= lo && v <= hi) t.push(v);
+    }
+  }
+  return t;
+}
+
+// Minor ticks for a linear axis: `sub` subdivisions inside each of the `n`
+// major intervals (the major boundaries themselves are excluded).
+function minorTicksLin(lo, hi, n = 5, sub = 5) {
+  if (lo === hi) return [];
+  const t = [], step = (hi - lo) / n;
+  for (let k = 0; k < n; k++)
+    for (let s = 1; s < sub; s++) t.push(lo + step * (k + s / sub));
+  return t;
 }
 
 // Value used in the dataset dropdown for the live, in-memory sweep.
 const CURRENT = "__current__";
+
+// Fetch one run's series by its dropdown value (CURRENT -> the live, in-memory
+// sweep; otherwise a saved .csv in the scan folder). Returns the series tagged
+// with a display name, or null if it didn't load.
+async function fetchSeries(value) {
+  const dir = $("folder").value.trim();
+  try {
+    const data = value === CURRENT
+      ? (await (await fetch("api/plot")).json()).plot
+      : (await (await fetch("api/dataset?name=" + encodeURIComponent(value) +
+                            "&dir=" + encodeURIComponent(dir))).json()).plot;
+    if (!data) return null;
+    return { name: value === CURRENT ? "Current sweep" : value, ...data };
+  } catch (_) {
+    return null;
+  }
+}
+
+// Values of the currently ticked dataset checkboxes.
+function checkedDatasets() {
+  return [...$("dataset").querySelectorAll("input:checked")].map(c => c.value);
+}
 
 async function refreshDatasets(announce = false) {
   const dir = $("folder").value.trim();
@@ -598,19 +680,24 @@ async function refreshDatasets(announce = false) {
   try {
     info = await (await fetch("api/datasets?dir=" + encodeURIComponent(dir))).json();
   } catch (_) {}
-  const sel = $("dataset"), prev = sel.value;
-  sel.innerHTML = "";
-  if (info.has_current) {
-    const o = document.createElement("option");
-    o.value = CURRENT; o.textContent = "Current sweep";
-    sel.appendChild(o);
+  const box = $("dataset");
+  const prev = new Set(checkedDatasets());  // keep ticks across a rescan
+  box.innerHTML = "";
+  const add = (value, text) => {
+    const lab = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.value = value; cb.checked = prev.has(value);
+    lab.appendChild(cb);
+    lab.appendChild(document.createTextNode(text));
+    box.appendChild(lab);
+  };
+  if (info.has_current) add(CURRENT, "Current sweep");
+  for (const name of (info.datasets || [])) add(name, name);
+  if (!box.children.length) {
+    const span = document.createElement("span");
+    span.className = "empty"; span.textContent = "No datasets found.";
+    box.appendChild(span);
   }
-  for (const name of (info.datasets || [])) {
-    const o = document.createElement("option");
-    o.value = name; o.textContent = name;
-    sel.appendChild(o);
-  }
-  if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
   if (announce) {
     const n = (info.datasets || []).length;
     const where = info.dir || dir;
@@ -620,34 +707,31 @@ async function refreshDatasets(announce = false) {
   }
 }
 
-async function selectDataset() {
-  const v = $("dataset").value;
-  if (v === CURRENT) { await loadPlot(); return; }
-  if (!v) { plotData = null; fillColumns(); drawPlot(); return; }
-  const dir = $("folder").value.trim();
-  try {
-    const r = await fetch("api/dataset?name=" + encodeURIComponent(v) +
-                          "&dir=" + encodeURIComponent(dir));
-    plotData = (await r.json()).plot;
-  } catch (_) { plotData = null; }
+// Load every selected run in parallel and overlay them. Failed/empty loads are
+// dropped so one bad file doesn't blank the whole plot.
+async function selectDatasets() {
+  const chosen = checkedDatasets();
+  const loaded = await Promise.all(chosen.map(fetchSeries));
+  plotSeries = loaded.filter(Boolean);
   fillColumns();
   drawPlot();
 }
 
-// After a run: rescan files, then show the just-collected (current) sweep.
+// After a run: rescan files, then tick the just-collected (current) sweep
+// (keeping any runs already ticked so they stay overlaid).
 async function showCurrent() {
   await refreshDatasets();
-  if ([...$("dataset").options].some(o => o.value === CURRENT))
-    $("dataset").value = CURRENT;
-  await selectDataset();
+  const cur = $("dataset").querySelector("input[value='" + CURRENT + "']");
+  if (cur) cur.checked = true;
+  await selectDatasets();
 }
 
 function drawPlot() {
   const cv = $("plot"), ctx = cv.getContext("2d");
   const W = cv.width, H = cv.height;
   const ink = getComputedStyle(cv).color || "#000";
-  const accent = "#2f81f7";
   ctx.clearRect(0, 0, W, H);
+  hoverPts = [];  // stale on every redraw; rebuilt as markers are drawn below
   ctx.font = "12px system-ui, sans-serif";
   ctx.textBaseline = "middle";
 
@@ -655,27 +739,35 @@ function drawPlot() {
     ctx.fillStyle = ink; ctx.globalAlpha = .6; ctx.textAlign = "left";
     ctx.fillText(msg, 16, 24); ctx.globalAlpha = 1;
   };
-  if (!plotData || !plotData.freq || !plotData.freq.length)
-    return note("No sweep data yet - run a sweep to plot.");
+  if (!plotSeries.length)
+    return note("No sweep data yet - run a sweep or pick a dataset to plot.");
 
   const col = $("column").value || "primary";
-  const ys = plotData[col] || [];
-  const ylabel = col === "primary" ? plotData.primary_label : plotData.secondary_label;
+  const ylabel = col === "primary"
+    ? plotSeries[0].primary_label : plotSeries[0].secondary_label;
   const xlog = $("xscale").value === "log";
   const ylog = $("yscale").value === "log";
 
-  const pts = [];
-  for (let k = 0; k < plotData.freq.length; k++) {
-    const x = plotData.freq[k], y = ys[k];
-    if (y === null || y === undefined || !isFinite(y)) continue;
-    if (xlog && x <= 0) continue;
-    if (ylog && y <= 0) continue;
-    pts.push({ x, y });
-  }
-  if (!pts.length) return note("No plottable points for this column/scale.");
+  // Build the plottable points for each run, dropping non-numeric / out-of-scale
+  // values. Runs that end up with no plottable points are omitted entirely.
+  const series = plotSeries.map(s => {
+    const ys = s[col] || [];
+    const pts = [];
+    for (let k = 0; k < (s.freq || []).length; k++) {
+      const x = s.freq[k], y = ys[k];
+      if (y === null || y === undefined || !isFinite(y)) continue;
+      if (xlog && x <= 0) continue;
+      if (ylog && y <= 0) continue;
+      pts.push({ x, y });
+    }
+    return { name: s.name, pts };
+  }).filter(s => s.pts.length);
+  if (!series.length) return note("No plottable points for this column/scale.");
 
+  // Axis ranges span every run so all overlaid curves fit.
   const L = 66, R = W - 16, T = 16, B = H - 38;
-  const xs = pts.map(p => p.x), yv = pts.map(p => p.y);
+  const xs = [], yv = [];
+  for (const s of series) for (const p of s.pts) { xs.push(p.x); yv.push(p.y); }
   const xlo = Math.min(...xs), xhi = Math.max(...xs);
   const ylo = Math.min(...yv), yhi = Math.max(...yv);
   const fx = v => xlog ? Math.log10(v) : v;
@@ -693,11 +785,11 @@ function drawPlot() {
   // magnitude (e.g. ~1e-7 F -> "n"), so ticks read "123" on a "Cp (nF)" axis
   // rather than "1.2e-7". Only for units with an SI base (F/H/Ω/S/...).
   const { name: yName, unit: yUnit } = splitUnit(ylabel);
-  let yFactor = 1, yUnitLabel = ylabel;
+  let yFactor = 1, yPrefix = "", yUnitLabel = ylabel;
   if (SCALABLE.has(yUnit)) {
-    const mags = pts.map(p => Math.abs(p.y)).filter(v => isFinite(v) && v > 0);
+    const mags = yv.map(Math.abs).filter(v => isFinite(v) && v > 0);
     const [factor, prefix] = siPrefix(mags.length ? Math.max(...mags) : 0);
-    yFactor = factor;
+    yFactor = factor; yPrefix = prefix;
     yUnitLabel = `${yName} (${prefix}${yUnit})`;
   }
 
@@ -715,6 +807,19 @@ function drawPlot() {
     ctx.globalAlpha = .12; ctx.beginPath(); ctx.moveTo(L, py); ctx.lineTo(R, py); ctx.stroke();
     ctx.globalAlpha = .8; ctx.fillText(fmtNum(yt / yFactor), L - 6, py);
   }
+
+  // Subticks: short unlabeled marks reaching inward from each axis.
+  ctx.globalAlpha = .4;
+  for (const xt of (xlog ? minorTicksLog(xlo, xhi) : minorTicksLin(xlo, xhi))) {
+    const px = sx(xt);
+    ctx.beginPath(); ctx.moveTo(px, B); ctx.lineTo(px, B - 4); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(px, T); ctx.lineTo(px, T + 4); ctx.stroke();
+  }
+  for (const yt of (ylog ? minorTicksLog(ylo, yhi) : minorTicksLin(ylo, yhi))) {
+    const py = sy(yt);
+    ctx.beginPath(); ctx.moveTo(L, py); ctx.lineTo(L + 4, py); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(R, py); ctx.lineTo(R - 4, py); ctx.stroke();
+  }
   ctx.globalAlpha = 1;
 
   // Frame + axis titles.
@@ -728,14 +833,72 @@ function drawPlot() {
   ctx.fillText((ylog ? "log " : "") + yUnitLabel, 0, 0);
   ctx.restore();
 
-  // Data line + point markers.
-  ctx.strokeStyle = accent; ctx.fillStyle = accent; ctx.lineWidth = 2;
-  ctx.beginPath();
-  pts.forEach((p, k) => { const X = sx(p.x), Y = sy(p.y); k ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y); });
-  ctx.stroke();
-  for (const p of pts) { ctx.beginPath(); ctx.arc(sx(p.x), sy(p.y), 2.5, 0, Math.PI * 2); ctx.fill(); }
+  // Data line + point markers, one colour per overlaid run. Each marker also
+  // records its screen position and an exact-value tooltip string for hover.
+  series.forEach((s, i) => {
+    const color = PALETTE[i % PALETTE.length];
+    ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 2;
+    ctx.beginPath();
+    s.pts.forEach((p, k) => { const X = sx(p.x), Y = sy(p.y); k ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y); });
+    ctx.stroke();
+    for (const p of s.pts) {
+      const X = sx(p.x), Y = sy(p.y);
+      ctx.beginPath(); ctx.arc(X, Y, 2.5, 0, Math.PI * 2); ctx.fill();
+      // Y matches the axis's shared SI prefix; frequency gets its own per-point
+      // prefix so each reads naturally (e.g. 20 Hz, 1.23 kHz, 200 kHz).
+      const yStr = fmtFull(p.y / yFactor) + (yUnit ? " " + yPrefix + yUnit : "");
+      const text = (series.length > 1 ? s.name + "\\n" : "") +
+        fmtSI(p.x, "Hz") + "\\n" + yName + " = " + yStr;
+      hoverPts.push({ px: X, py: Y, text });
+    }
+  });
+
+  // Legend (only when overlaying more than one run): a coloured swatch and the
+  // run name per series, top-right and right-aligned so long names grow inward.
+  if (series.length > 1) {
+    series.forEach((s, i) => {
+      const color = PALETTE[i % PALETTE.length];
+      const ly = T + 10 + i * 16;
+      ctx.textAlign = "right"; ctx.fillStyle = ink; ctx.globalAlpha = .85;
+      ctx.fillText(s.name, R - 8, ly);
+      const tw = ctx.measureText(s.name).width;
+      ctx.globalAlpha = 1; ctx.strokeStyle = color; ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(R - 8 - tw - 22, ly); ctx.lineTo(R - 8 - tw - 8, ly); ctx.stroke();
+    });
+  }
 }
 
+// Hover readout: find the marker nearest the cursor (within ~14 canvas px) and
+// show its exact values in a tooltip. The canvas is drawn at its intrinsic
+// 680x360 but displayed scaled to fit, so map mouse -> canvas coords first.
+function showTip(evt) {
+  const cv = $("plot"), tip = $("tip");
+  if (!hoverPts.length) { tip.style.display = "none"; return; }
+  const rect = cv.getBoundingClientRect();
+  const scaleX = cv.width / rect.width, scaleY = cv.height / rect.height;
+  const mx = (evt.clientX - rect.left) * scaleX;
+  const my = (evt.clientY - rect.top) * scaleY;
+  let best = null, bestD = 14 * 14;
+  for (const p of hoverPts) {
+    const d = (p.px - mx) ** 2 + (p.py - my) ** 2;
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  if (!best) { tip.style.display = "none"; return; }
+  tip.textContent = best.text;
+  tip.style.display = "block";
+  // Position in CSS pixels (offset from the canvas within the wrap), flipping
+  // left/up near the right/bottom edges so the tip stays on the canvas.
+  let x = cv.offsetLeft + best.px / scaleX + 12;
+  let y = cv.offsetTop + best.py / scaleY + 12;
+  if (x + tip.offsetWidth > cv.offsetLeft + rect.width) x -= tip.offsetWidth + 24;
+  if (y + tip.offsetHeight > cv.offsetTop + rect.height) y -= tip.offsetHeight + 24;
+  tip.style.left = x + "px";
+  tip.style.top = y + "px";
+}
+
+$("plot").addEventListener("mousemove", showTip);
+$("plot").addEventListener("mouseleave", () => { $("tip").style.display = "none"; });
 $("refresh").onclick = refreshPorts;
 $("run").onclick = run;
 $("cancel").onclick = cancel;
@@ -743,13 +906,13 @@ for (const id of ["name", "author", "desc", "func"])
   $(id).addEventListener("input", schedulePreview);
 for (const id of ["column", "xscale", "yscale"])
   $(id).addEventListener("change", drawPlot);
-$("dataset").onchange = selectDataset;
-$("scan").onclick = async () => { await refreshDatasets(true); await selectDataset(); };
+$("dataset").onchange = selectDatasets;
+$("scan").onclick = async () => { await refreshDatasets(true); await selectDatasets(); };
 $("folder").addEventListener("keydown", e => { if (e.key === "Enter") $("scan").click(); });
 
 refreshPorts();
 refreshPreview();
-refreshDatasets().then(selectDataset);
+refreshDatasets().then(selectDatasets);
 </script>
 </body>
 </html>
