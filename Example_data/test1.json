@@ -4,6 +4,10 @@
   "author": "Author1",
   "description": "Decription1",
   "measurement": "Ls (H)-Rs (\u03a9)",
+  "units": {
+    "primary": "H",
+    "secondary": "\u03a9"
+  },
   "tags": [
     "short",
     "plated"

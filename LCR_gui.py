@@ -107,6 +107,21 @@ def measurement_label(func: str) -> str:
     return "(read from meter at run time)"
 
 
+def measurement_units(func: str) -> dict | str:
+    """
+    Parsed (primary, secondary) units for the preview. Mirrors what save_sweep
+    records. If no function is selected (FUNC_KEEP), the units aren't known until
+    the meter is read at run time, so a placeholder string is shown instead.
+    """
+    if func in lcr.IMP_FUNCTIONS:
+        primary, secondary = lcr.IMP_FUNCTIONS[func]
+        return {
+            "primary": lcr.label_unit(primary),
+            "secondary": lcr.label_unit(secondary),
+        }
+    return "(read from meter at run time)"
+
+
 def build_preview(
     name: str, author: str, description: str, func: str,
     tags: list[str] | None = None,
@@ -120,6 +135,7 @@ def build_preview(
         "author": author.strip(),
         "description": description.strip(),
         "measurement": measurement_label(func),
+        "units": measurement_units(func),
         "tags": list(tags or []),
     }
 
@@ -261,7 +277,9 @@ def run_sweep_worker(params: dict) -> None:
             STATE.log(f"  [{i}/{total}] {freq:10.2f} Hz  ->  {data}")
 
         rows, primary, secondary, test_time = lcr.collect_sweep(
-            ser, progress=progress, should_stop=STATE.stop_event.is_set
+            ser, start_hz=params["start"], stop_hz=params["stop"],
+            points=params["points"], progress=progress,
+            should_stop=STATE.stop_event.is_set,
         )
 
         # Expose the data to the visualizer even if the sweep was cancelled
@@ -314,6 +332,24 @@ def start_sweep(params: dict) -> dict:
     except (TypeError, ValueError):
         return {"error": f"Baud must be a number, got {params.get('baud')!r}."}
 
+    # Sweep span/points. 20 Hz is the meter's floor; the log sweep needs both
+    # endpoints positive, stop above start, and at least two points.
+    try:
+        start = float(params.get("start"))   # pyright: ignore[reportArgumentType]
+        stop = float(params.get("stop"))      # pyright: ignore[reportArgumentType]
+    except (TypeError, ValueError):
+        return {"error": "Start and Stop frequencies must be numbers."}
+    if start <= 0 or stop <= 0:
+        return {"error": "Start and Stop frequencies must be positive."}
+    if stop <= start:
+        return {"error": "Stop frequency must be greater than Start."}
+    try:
+        points = int(params.get("points"))    # pyright: ignore[reportArgumentType]
+    except (TypeError, ValueError):
+        return {"error": f"Points must be a whole number, got {params.get('points')!r}."}
+    if points < 2:
+        return {"error": "Points must be at least 2."}
+
     func = params.get("func") or FUNC_KEEP
     tags = [str(t).strip() for t in (params.get("tags") or []) if str(t).strip()]
     run = {
@@ -324,6 +360,9 @@ def start_sweep(params: dict) -> dict:
         "author": (params.get("author") or "").strip(),
         "description": (params.get("description") or "").strip(),
         "tags": tags,
+        "start": start,
+        "stop": stop,
+        "points": points,
     }
 
     with STATE.lock:
@@ -402,6 +441,21 @@ PAGE = """<!doctype html>
     <label for="func">Function</label>
     <select id="func">__FUNCS__</select>
     <span></span>
+  </div>
+  <div class="row">
+    <label for="start">Start (Hz)</label>
+    <input id="start" type="number" min="0" step="any" value="__START__">
+    <span></span>
+  </div>
+  <div class="row">
+    <label for="stop">Stop (Hz)</label>
+    <input id="stop" type="number" min="0" step="any" value="__STOP__">
+    <span></span>
+  </div>
+  <div class="row">
+    <label for="points">Points</label>
+    <input id="points" type="number" min="2" step="1" value="__POINTS__">
+    <span class="hint">log-spaced from start to stop</span>
   </div>
   <div class="row">
     <label for="name">Filename</label>
@@ -615,6 +669,7 @@ async function run() {
     port: $("port").value, baud: $("baud").value, func: $("func").value,
     name: $("name").value, author: $("author").value, description: $("desc").value,
     tags: checkedTags(),
+    start: $("start").value, stop: $("stop").value, points: $("points").value,
   };
   const r = await fetch("api/start", {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -1091,7 +1146,13 @@ def render_page() -> bytes:
         f"<option value='{f}'>{f}</option>"
         for f in [FUNC_KEEP] + sorted(lcr.IMP_FUNCTIONS)
     )
-    html = PAGE.replace("__BAUDS__", bauds).replace("__FUNCS__", funcs)
+    html = (
+        PAGE.replace("__BAUDS__", bauds)
+            .replace("__FUNCS__", funcs)
+            .replace("__START__", f"{lcr.SWEEP_START_HZ:g}")
+            .replace("__STOP__", f"{lcr.SWEEP_STOP_HZ:g}")
+            .replace("__POINTS__", str(lcr.SWEEP_POINTS))
+    )
     return html.encode("utf-8")
 
 

@@ -78,6 +78,7 @@ import argparse
 import csv
 import json
 import logging
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -412,6 +413,17 @@ def get_measurement_labels(ser: serial.Serial) -> tuple[str, str]:
     return primary, secondary
 
 
+def label_unit(label: str) -> str:
+    """
+    Pull the unit out of a measurement label, e.g. "Cp (F)" -> "F", "Rs (Ω)" ->
+    "Ω", "theta (deg)" -> "deg". Dimensionless labels like "D" or "Q" (and the
+    generic "Primary"/"Secondary" fallback) have no parenthesised unit and
+    return "". This is the parsed unit recorded in the JSON sidecar.
+    """
+    m = re.match(r"^.*?\(([^)]*)\)\s*$", label)
+    return m.group(1).strip() if m else ""
+
+
 # ── Tags ──────────────────────────────────────────────────────────────────────
 
 def _parse_yaml_tag(text: str) -> str:
@@ -567,6 +579,10 @@ def save_sweep(
         "author": author,
         "description": description,
         "measurement": f"{primary_label}-{secondary_label}",
+        "units": {
+            "primary": label_unit(primary_label),
+            "secondary": label_unit(secondary_label),
+        },
         "tags": list(tags or []),
     }
     with json_path.open("w", encoding="utf-8") as f:
