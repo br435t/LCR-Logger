@@ -510,7 +510,7 @@ PAGE = """<!doctype html>
   </div>
   <div class="row">
     <label for="name">Filename</label>
-    <input id="name"><span></span>
+    <input id="name"><span class="hint">auto: author_datetime (editable)</span>
   </div>
   <div class="row">
     <label for="author">Author</label>
@@ -648,6 +648,32 @@ function schedulePreview() {
   previewTimer = setTimeout(refreshPreview, 150);
 }
 
+// ── Auto filename (author_datetime) ──────────────────────────
+// The filename is auto-managed as "<author>_<datetime>" until the user edits
+// the field by hand. Editing turns auto off; clearing it turns auto back on.
+
+// Filesystem-safe local timestamp, e.g. 2026-06-16_10-52-28 (no colons).
+function nowStamp() {
+  const d = new Date(), p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_` +
+         `${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
+}
+
+// "<author>_<stamp>" (just the stamp if no author). Author is sanitised to
+// characters safe in a filename, so e.g. "Brad / Lab" -> "Brad _ Lab".
+function autoStem() {
+  const author = $("author").value.trim().replace(/[^\\w.\\- ]/g, "_");
+  const stamp = nowStamp();
+  return author ? `${author}_${stamp}` : stamp;
+}
+
+let nameAuto = true;
+function autofillName() {
+  if (!nameAuto) return;
+  $("name").value = autoStem();
+  schedulePreview();
+}
+
 // ── Tags ─────────────────────────────────────────────────────
 // Tags are checkboxes built from the server's YAML, grouped into sections
 // (test parameters / test configurations). New ones can be added at runtime to
@@ -782,6 +808,7 @@ async function poll() {
 }
 
 async function run() {
+  if (nameAuto) autofillName();  // refresh the timestamp to the actual run time
   const body = {
     port: $("port").value, baud: $("baud").value, func: $("func").value,
     name: $("name").value, author: $("author").value, description: $("desc").value,
@@ -1241,6 +1268,10 @@ $("run").onclick = run;
 $("cancel").onclick = cancel;
 for (const id of ["name", "author", "desc", "func"])
   $(id).addEventListener("input", schedulePreview);
+// Keep the filename auto-synced to "author_datetime"; a manual edit takes over,
+// and clearing the field hands control back to auto.
+$("author").addEventListener("input", autofillName);
+$("name").addEventListener("input", () => { nameAuto = $("name").value.trim() === ""; });
 $("tags").addEventListener("change", schedulePreview);
 $("addtag").onclick = addTag;
 $("newtag").addEventListener("keydown", e => { if (e.key === "Enter") addTag(); });
@@ -1256,6 +1287,7 @@ $("folder").addEventListener("keydown", e => { if (e.key === "Enter") $("scan").
 
 refreshPorts();
 refreshTags();
+autofillName();   // seed the filename with the current timestamp
 refreshPreview();
 refreshDatasets().then(selectDatasets);
 </script>
