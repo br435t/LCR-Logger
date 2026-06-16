@@ -123,12 +123,19 @@ SERIAL_TIMEOUT_S = 2.0
 # Log file written to the working directory.
 LOG_FILE = "LCR_logging.log"
 
-# User-selectable measurement tags live here (working directory) as a simple
-# YAML list of strings. Kept dependency-free (no PyYAML): the load/save helpers
-# below parse and emit the flat-list format themselves, because adding a pip
-# dependency is painful on this machine (corporate SSL inspection -- see
-# HANDOFF.md "Environment quirks"). The file is created on first add.
+# User-selectable measurement tags live here (working directory) as a small
+# YAML mapping of section -> list of tag strings. Kept dependency-free (no
+# PyYAML): the load/save helpers below parse and emit the format themselves,
+# because adding a pip dependency is painful on this machine (corporate SSL
+# inspection -- see HANDOFF.md "Environment quirks"). The file is created on
+# first add.
 TAGS_FILE = Path("tags.yaml")
+
+# The two tag sections, in display order. Keys are the YAML/sidecar field names;
+# the GUI/CLI show them title-cased ("test_parameters" -> "Test parameters").
+# A tag selection is recorded per-section, so a saved sweep's sidecar knows
+# which kind of tag each one was.
+TAG_SECTIONS: tuple[str, ...] = ("test_parameters", "test_configurations")
 
 # Map each FUNCtion:IMPedance code to its (primary, secondary) parameter
 # labels, with units in parentheses, so output headers and plot axes read
@@ -445,60 +452,131 @@ def _parse_yaml_tag(text: str) -> str:
     return text
 
 
-def load_tags(path: Path = TAGS_FILE) -> list[str]:
+def _section_header(line: str) -> str | None:
     """
-    Read the YAML tag list, returning unique tags in file order. Missing or
-    unreadable file -> empty list (tags are optional). Blank lines and
-    "# comments" are skipped; each remaining "- value" line yields one tag.
+    If `line` is a bare YAML mapping key ("test_parameters:") return the key,
+    else None. A key has a trailing colon, is not a "- value" list item, and
+    carries no inline value after the colon (that would be a scalar, not a
+    section we collect items under).
     """
+    if line.startswith("-") or not line.endswith(":"):
+        return None
+    return line[:-1].strip() or None
+
+
+def load_tag_groups(path: Path = TAGS_FILE) -> dict[str, list[str]]:
+    """
+    Read the YAML tag file, returning {section: [unique tags in file order]}.
+    The two canonical sections (TAG_SECTIONS) are always present (possibly
+    empty); any extra sections found in the file are preserved after them.
+
+    Blank lines and "# comments" are skipped. A "key:" line starts a section;
+    each following "- value" line adds a tag to it. For backward compatibility
+    with the old flat list, "- value" lines that appear before any section
+    header land in the first section. Missing/unreadable file -> empty sections.
+    """
+    groups: dict[str, list[str]] = {s: [] for s in TAG_SECTIONS}
     if not path.is_file():
-        return []
-    tags: list[str] = []
+        return groups
+    current = TAG_SECTIONS[0]  # legacy bare items fall into the first section
     try:
         for raw in path.read_text(encoding="utf-8").splitlines():
             line = raw.strip()
             if not line or line.startswith("#"):
                 continue
+            section = _section_header(line)
+            if section is not None:
+                current = section
+                groups.setdefault(section, [])
+                continue
             if line.startswith("-"):
                 line = line[1:]
             tag = _parse_yaml_tag(line)
-            if tag and tag not in tags:
-                tags.append(tag)
+            # Tags are unique across the whole file -- a name belongs to one
+            # section, so a duplicate (in this or another section) is ignored.
+            if tag and not any(tag in v for v in groups.values()):
+                groups[current].append(tag)
     except OSError as exc:
         log.warning("Could not read tags from %s: %s", path, exc)
-        return []
-    return tags
+        return {s: [] for s in TAG_SECTIONS}
+    return groups
 
 
-def save_tags(tags: list[str], path: Path = TAGS_FILE) -> None:
+def load_tags(path: Path = TAGS_FILE) -> list[str]:
     """
-    Write the tag list back as a flat YAML sequence. Each value is emitted with
-    json.dumps -- a double-quoted scalar that is valid YAML and round-trips any
-    punctuation/Unicode safely (so e.g. a tag with a colon won't corrupt the
-    file). A header comment documents the format for anyone editing by hand.
+    Flat list of every tag across all sections, in file order, for callers that
+    just need the set of known names regardless of section.
+    """
+    flat: list[str] = []
+    for tags in load_tag_groups(path).values():
+        flat.extend(tags)
+    return flat
+
+
+def save_tag_groups(groups: dict[str, list[str]], path: Path = TAGS_FILE) -> None:
+    """
+    Write the section -> tags mapping back as YAML. Canonical sections come
+    first (always emitted, even if empty), then any extra sections. Each tag is
+    emitted with json.dumps -- a double-quoted scalar that is valid YAML and
+    round-trips punctuation/Unicode safely. A header comment documents the
+    format for anyone editing by hand.
     """
     lines = [
-        "# LCR Logger measurement tags -- one per line as a YAML list.",
-        "# Edit by hand or add new tags from the GUI/CLI before a sweep.",
+        "# LCR Logger measurement tags, grouped into sections.",
+        "# Add tags under either section as \"- value\" lines (GUI/CLI or by hand).",
         "",
     ]
-    lines += [f"- {json.dumps(tag, ensure_ascii=False)}" for tag in tags]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    keys = list(TAG_SECTIONS) + [k for k in groups if k not in TAG_SECTIONS]
+    for key in keys:
+        lines.append(f"{key}:")
+        for tag in groups.get(key, []):
+            lines.append(f"  - {json.dumps(tag, ensure_ascii=False)}")
+        lines.append("")
+    path.write_text("\n".join(lines).rstrip("\n") + "\n", encoding="utf-8")
 
 
-def add_tag(tag: str, path: Path = TAGS_FILE) -> list[str]:
+def add_tag(
+    tag: str, section: str = TAG_SECTIONS[0], path: Path = TAGS_FILE
+) -> dict[str, list[str]]:
     """
-    Add a tag to the list (creating the file if needed) and return the updated,
-    case-insensitively sorted list. A blank or duplicate tag is a no-op. This is
-    how new tags get persisted "at runtime" from either front end.
+    Add a tag to the given section (creating the file if needed) and return the
+    updated section -> tags mapping, each section case-insensitively sorted. A
+    blank tag, an unknown section, or a name already present in any section is a
+    no-op. This is how new tags get persisted "at runtime" from either front end.
     """
     tag = tag.strip()
-    tags = load_tags(path)
-    if tag and tag not in tags:
-        tags.append(tag)
-        tags.sort(key=str.lower)
-        save_tags(tags, path)
-    return tags
+    groups = load_tag_groups(path)
+    if section not in groups:
+        section = TAG_SECTIONS[0]
+    if tag and not any(tag in v for v in groups.values()):
+        groups[section].append(tag)
+        groups[section].sort(key=str.lower)
+        save_tag_groups(groups, path)
+    return groups
+
+
+def normalize_tag_selection(tags: object) -> dict[str, list[str]]:
+    """
+    Coerce a tag selection into the {section: [tags]} shape recorded in a
+    sweep's JSON sidecar. Accepts the categorized dict form (as the GUI/CLI now
+    produce), or a flat list/tuple (legacy or uncategorized callers), which is
+    recorded under the first section. The canonical sections are always present.
+    """
+    result: dict[str, list[str]] = {s: [] for s in TAG_SECTIONS}
+    if isinstance(tags, dict):
+        for section, vals in tags.items():
+            bucket = result.setdefault(str(section), [])
+            for t in (vals or []):
+                t = str(t).strip()
+                if t and t not in bucket:
+                    bucket.append(t)
+    elif isinstance(tags, (list, tuple)):
+        bucket = result[TAG_SECTIONS[0]]
+        for t in tags:
+            t = str(t).strip()
+            if t and t not in bucket:
+                bucket.append(t)
+    return result
 
 
 # ── Sweep result saving ───────────────────────────────────────────────────────
@@ -511,7 +589,7 @@ def save_sweep(
     primary_label: str = "Primary",
     secondary_label: str = "Secondary",
     test_time: datetime | None = None,
-    tags: list[str] | None = None,
+    tags: dict[str, list[str]] | list[str] | None = None,
 ) -> tuple[Path, Path, Path]:
     """
     Write sweep results to the data folder. No prompting -- all metadata is
@@ -530,8 +608,10 @@ def save_sweep(
         secondary_label: Header for the secondary parameter column (e.g. "X", "D").
         test_time: When the sweep was run, recorded in the JSON sidecar. Defaults
               to the current time if not supplied.
-        tags: Optional list of user-selected tags, recorded in the JSON sidecar
-              for cataloguing/filtering. Defaults to an empty list.
+        tags: User-selected tags recorded in the JSON sidecar for
+              cataloguing/filtering. Either the categorized {section: [tags]}
+              mapping or a flat list (taken as uncategorized); normalized to the
+              {section: [tags]} shape on write. Defaults to no tags.
 
     Returns:
         (txt_path, csv_path, json_path) -- the three files written. DATA_DIR is
@@ -583,7 +663,7 @@ def save_sweep(
             "primary": label_unit(primary_label),
             "secondary": label_unit(secondary_label),
         },
-        "tags": list(tags or []),
+        "tags": normalize_tag_selection(tags),
     }
     with json_path.open("w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
@@ -622,22 +702,28 @@ def prompt_and_save(
     )
 
 
-def prompt_for_tags() -> list[str]:
+def prompt_for_tags() -> dict[str, list[str]]:
     """
-    Prompt for comma-separated tags, showing any already defined in TAGS_FILE.
-    Any tag the user types that isn't already known is persisted to the YAML so
-    it's offered next time -- this is the CLI's "add new tags at runtime" path.
-    Press Enter to attach no tags.
+    Prompt for tags one section at a time, showing any already defined in
+    TAGS_FILE for that section. Any tag the user types that isn't already known
+    is persisted to its section in the YAML so it's offered next time -- this is
+    the CLI's "add new tags at runtime" path. Press Enter to skip a section.
+    Returns the categorized {section: [tags]} selection.
     """
-    available = load_tags()
-    if available:
-        print("Available tags: " + ", ".join(available))
-    entry = input("Tags (comma-separated, optional): ").strip()
-    if not entry:
-        return []
-    chosen = [t.strip() for t in entry.split(",") if t.strip()]
-    for tag in chosen:
-        add_tag(tag)
+    groups = load_tag_groups()
+    chosen: dict[str, list[str]] = {s: [] for s in TAG_SECTIONS}
+    for section in TAG_SECTIONS:
+        label = section.replace("_", " ").capitalize()
+        available = groups.get(section, [])
+        if available:
+            print(f"Available {label.lower()}: " + ", ".join(available))
+        entry = input(f"{label} (comma-separated, optional): ").strip()
+        if not entry:
+            continue
+        for tag in (t.strip() for t in entry.split(",") if t.strip()):
+            add_tag(tag, section)
+            if tag not in chosen[section]:
+                chosen[section].append(tag)
     return chosen
 
 

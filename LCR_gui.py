@@ -124,7 +124,7 @@ def measurement_units(func: str) -> dict | str:
 
 def build_preview(
     name: str, author: str, description: str, func: str,
-    tags: list[str] | None = None,
+    tags: dict[str, list[str]] | list[str] | None = None,
 ) -> dict:
     """The JSON sidecar that *will* be written, from the current field values."""
     stem = Path(name).with_suffix("") if name else Path("<filename>")
@@ -136,7 +136,7 @@ def build_preview(
         "description": description.strip(),
         "measurement": measurement_label(func),
         "units": measurement_units(func),
-        "tags": list(tags or []),
+        "tags": lcr.normalize_tag_selection(tags),
     }
 
 
@@ -231,27 +231,69 @@ def load_dataset(name: str, folder: str = "") -> dict | None:
     }
 
 
-def dataset_tags(name: str, folder: str = "") -> list[str]:
+def dataset_tag_groups(name: str, folder: str = "") -> dict[str, list[str]]:
     """
     Tags recorded in a dataset's JSON sidecar (the `tags` field save_sweep
-    writes), used to filter the visualizer's dataset list. Returns an empty list
-    if the sidecar is missing, unreadable, or carries no tags. Like load_dataset,
-    only a bare filename within `folder` is accepted.
+    writes), as the categorized {section: [tags]} mapping. Handles both the
+    current dict shape and the legacy flat list (recorded under the first
+    section). Returns empty sections if the sidecar is missing, unreadable, or
+    carries no tags. Like load_dataset, only a bare filename within `folder` is
+    accepted.
     """
     json_path = dataset_dir(folder) / f"{Path(name).name}.json"
     if not json_path.is_file():
-        return []
+        return {s: [] for s in lcr.TAG_SECTIONS}
     try:
         meta = json.loads(json_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return []
-    tags = meta.get("tags", []) if isinstance(meta, dict) else []
-    return [str(t) for t in tags] if isinstance(tags, list) else []
+        return {s: [] for s in lcr.TAG_SECTIONS}
+    tags = meta.get("tags") if isinstance(meta, dict) else None
+    return lcr.normalize_tag_selection(tags)
 
 
-def datasets_with_tags(folder: str = "") -> dict[str, list[str]]:
-    """Map each dataset stem in `folder` to its sidecar tags (sorted by name)."""
-    return {name: dataset_tags(name, folder) for name in list_datasets(folder)}
+def dataset_tags(name: str, folder: str = "") -> list[str]:
+    """Flat list of a dataset's tags across all sections, for display/matching."""
+    return [t for ts in dataset_tag_groups(name, folder).values() for t in ts]
+
+
+def datasets_with_tag_groups(folder: str = "") -> dict[str, dict[str, list[str]]]:
+    """Map each dataset stem in `folder` to its categorized sidecar tags."""
+    return {name: dataset_tag_groups(name, folder) for name in list_datasets(folder)}
+
+
+# Section the visualizer filter uses for dataset tags that aren't defined in
+# tags.yaml (e.g. tags since removed from the YAML, or legacy uncategorized
+# sidecars). Shown as its own box after the canonical sections.
+OTHER_TAG_SECTION = "other"
+
+
+def filter_tag_groups(folder: str = "") -> dict[str, list[str]]:
+    """
+    Tags present across a folder's datasets, grouped for the visualizer filter.
+    tags.yaml is the source of truth for a tag's section: each dataset tag is
+    placed in its YAML section, and any tag not in the YAML falls into the
+    "other" section. Sections are ordered (canonical first, then "other") and
+    empty sections are omitted, so the filter shows only what's filterable.
+    """
+    section_of = {
+        tag: section
+        for section, tags in lcr.load_tag_groups().items()
+        for tag in tags
+    }
+    present = {
+        tag
+        for groups in datasets_with_tag_groups(folder).values()
+        for tags in groups.values()
+        for tag in tags
+    }
+    grouped: dict[str, list[str]] = {}
+    for tag in sorted(present, key=str.lower):
+        grouped.setdefault(section_of.get(tag, OTHER_TAG_SECTION), []).append(tag)
+
+    order = list(lcr.TAG_SECTIONS) + [OTHER_TAG_SECTION]
+    ordered = {s: grouped[s] for s in order if s in grouped}
+    ordered.update({s: grouped[s] for s in grouped if s not in ordered})
+    return ordered
 
 
 # ── Sweep worker (mirrors the old _run_worker) ───────────────────────────────
@@ -351,7 +393,7 @@ def start_sweep(params: dict) -> dict:
         return {"error": "Points must be at least 2."}
 
     func = params.get("func") or FUNC_KEEP
-    tags = [str(t).strip() for t in (params.get("tags") or []) if str(t).strip()]
+    tags = lcr.normalize_tag_selection(params.get("tags"))
     run = {
         "port": port,
         "baud": baud,
@@ -401,6 +443,15 @@ PAGE = """<!doctype html>
   .checklist input { width: auto; margin: 0 6px 0 0; }
   .checklist .empty { opacity: .6; }
   .checklist .tagnote { opacity: .55; margin-left: 6px; font-size: 12px; }
+  /* One scrollable checklist box per tag section, side by side; wraps to the
+     next line when there isn't room (e.g. with an extra "other" section). */
+  .taggrid { display: flex; flex-wrap: wrap; gap: 8px; }
+  .taggrid .tagcol { flex: 1 1 140px; min-width: 0; text-align: left; }
+  .taghead { font-size: 11px; font-weight: 600; text-transform: uppercase;
+             letter-spacing: .04em; opacity: .55; margin: 0 0 2px; }
+  .addtag { display: flex; gap: 8px; }
+  .addtag input { flex: 1; }
+  .addtag select { width: auto; }
   input, select, button { font: inherit; padding: 5px 7px; border-radius: 6px;
           border: 1px solid #8886; background: Field; color: FieldText; }
   input, select { width: 100%; box-sizing: border-box; }
@@ -471,12 +522,15 @@ PAGE = """<!doctype html>
   </div>
   <div class="row">
     <label>Tags</label>
-    <div id="tags" class="checklist"></div>
+    <div id="tags" class="taggrid"></div>
     <span class="hint">Tick tags to attach to this run</span>
   </div>
   <div class="row">
     <label for="newtag">Add tag</label>
-    <input id="newtag" placeholder="new tag name, then Add">
+    <div class="addtag">
+      <input id="newtag" placeholder="new tag name, then Add">
+      <select id="newtagsection"></select>
+    </div>
     <button id="addtag" type="button">Add</button>
   </div>
 </fieldset>
@@ -506,7 +560,7 @@ PAGE = """<!doctype html>
   </div>
   <div class="row">
     <label>Filter tags</label>
-    <div id="tagfilter" class="checklist"></div>
+    <div id="tagfilter" class="taggrid"></div>
     <span class="hint">Show only datasets with these tags</span>
   </div>
   <div class="row">
@@ -595,46 +649,109 @@ function schedulePreview() {
 }
 
 // ── Tags ─────────────────────────────────────────────────────
-// Tags are checkboxes built from the server's YAML list; new ones can be added
-// at runtime, which persists them server-side and ticks them for this run.
+// Tags are checkboxes built from the server's YAML, grouped into sections
+// (test parameters / test configurations). New ones can be added at runtime to
+// a chosen section, which persists them server-side and ticks them for this run.
+
+// "test_parameters" -> "Test parameters" for section headings/dropdowns.
+function sectionLabel(s) {
+  const t = s.replace(/_/g, " ");
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+
+// Ticked run tags as the categorized {section: [tag, ...]} selection the
+// server records in the sidecar. Sections with no ticks are omitted.
 function checkedTags() {
-  return [...$("tags").querySelectorAll("input:checked")].map(c => c.value);
+  const groups = {};
+  for (const cb of $("tags").querySelectorAll("input:checked")) {
+    const s = cb.dataset.section;
+    (groups[s] = groups[s] || []).push(cb.value);
+  }
+  return groups;
+}
+
+// Render {section: [tags]} into `container` as one labeled, scrollable checklist
+// box per section, side by side. `isChecked(section, name)` sets each box's
+// initial ticks; `emptyText` (optional) fills a section that has no tags.
+// Returns the number of checkboxes rendered. Shared by the run picker and the
+// visualizer's tag filter.
+function renderTagBoxes(container, groups, isChecked, emptyText) {
+  container.innerHTML = "";
+  let count = 0;
+  for (const section of Object.keys(groups)) {
+    const tags = groups[section] || [];
+    const col = document.createElement("div");
+    col.className = "tagcol";
+    const head = document.createElement("div");
+    head.className = "taghead"; head.textContent = sectionLabel(section);
+    col.appendChild(head);
+    const list = document.createElement("div");
+    list.className = "checklist";
+    for (const name of tags) {
+      count++;
+      const lab = document.createElement("label");
+      const cb = document.createElement("input");
+      cb.type = "checkbox"; cb.value = name; cb.dataset.section = section;
+      cb.checked = isChecked(section, name);
+      lab.appendChild(cb);
+      lab.appendChild(document.createTextNode(name));
+      list.appendChild(lab);
+    }
+    if (!tags.length && emptyText) {
+      const span = document.createElement("span");
+      span.className = "empty"; span.textContent = emptyText;
+      list.appendChild(span);
+    }
+    col.appendChild(list);
+    container.appendChild(col);
+  }
+  return count;
+}
+
+// Render the run-tag picker (one box per section) and keep the add-tag section
+// dropdown in sync with the sections the server knows about.
+function renderTagPicker(groups) {
+  const prev = checkedTags();  // keep ticks across a refresh, per section
+  const sections = Object.keys(groups);
+  renderTagBoxes($("tags"), groups,
+    (section, name) => (prev[section] || []).includes(name), "No tags yet.");
+  if (!sections.length) {
+    const span = document.createElement("span");
+    span.className = "empty"; span.textContent = "No tags yet - add one below.";
+    $("tags").appendChild(span);
+  }
+
+  // Section dropdown for the "Add tag" control: one option per known section.
+  const sel = $("newtagsection"), prevSection = sel.value;
+  sel.innerHTML = "";
+  for (const section of sections) {
+    const o = document.createElement("option");
+    o.value = section; o.textContent = sectionLabel(section);
+    sel.appendChild(o);
+  }
+  if ([...sel.options].some(o => o.value === prevSection)) sel.value = prevSection;
 }
 
 async function refreshTags() {
-  let tags = [];
-  try { tags = (await (await fetch("api/tags")).json()).tags || []; } catch (_) {}
-  const box = $("tags");
-  const prev = new Set(checkedTags());  // keep ticks across a refresh
-  box.innerHTML = "";
-  for (const name of tags) {
-    const lab = document.createElement("label");
-    const cb = document.createElement("input");
-    cb.type = "checkbox"; cb.value = name; cb.checked = prev.has(name);
-    lab.appendChild(cb);
-    lab.appendChild(document.createTextNode(name));
-    box.appendChild(lab);
-  }
-  if (!box.children.length) {
-    const span = document.createElement("span");
-    span.className = "empty"; span.textContent = "No tags yet - add one below.";
-    box.appendChild(span);
-  }
+  let groups = {};
+  try { groups = (await (await fetch("api/tags")).json()).groups || {}; } catch (_) {}
+  renderTagPicker(groups);
 }
 
 async function addTag() {
   const input = $("newtag"), tag = input.value.trim();
+  const section = $("newtagsection").value;
   if (!tag) return;
   try {
     await fetch("api/tags", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tag }),
+      body: JSON.stringify({ tag, section }),
     });
   } catch (_) {}
   input.value = "";
   await refreshTags();
   for (const cb of $("tags").querySelectorAll("input"))
-    if (cb.value === tag) cb.checked = true;  // tick the just-added tag
+    if (cb.value === tag && cb.dataset.section === section) cb.checked = true;
   refreshPreview();
 }
 
@@ -744,10 +861,22 @@ function fmtSI(v, unit) {
   return fmtFull(v / factor) + " " + prefix + unit;
 }
 
-// "Cp (F)" -> {name:"Cp", unit:"F"};  "D" -> {name:"D", unit:""}
+// Fallback units for bare parameter names whose header carries no "(unit)" --
+// e.g. older CSVs (and the bundled Example_data) written with plain "Ls"/"Rs"
+// headers instead of "Ls (H)"/"Rs (Ω)". Keyed by parameter name; D and Q are
+// dimensionless and intentionally absent.
+const PARAM_UNITS = {
+  Cp: "F", Cs: "F", Lp: "H", Ls: "H",
+  Rp: "Ω", Rs: "Ω", R: "Ω", X: "Ω", G: "S",
+};
+
+// "Cp (F)" -> {name:"Cp", unit:"F"};  bare "Ls" -> {name:"Ls", unit:"H"} via
+// the PARAM_UNITS fallback;  "D" -> {name:"D", unit:""}.
 function splitUnit(label) {
   const m = /^(.*?)\\s*\\(([^)]*)\\)\\s*$/.exec(label);
-  return m ? { name: m[1], unit: m[2] } : { name: label, unit: "" };
+  if (m) return { name: m[1], unit: m[2] };
+  const name = (label || "").trim();
+  return { name, unit: PARAM_UNITS[name] || "" };
 }
 
 function fillColumns() {
@@ -825,7 +954,7 @@ async function fetchSeries(value) {
 
 // Latest /api/datasets response, kept so the tag filter can re-render the
 // dataset list without re-fetching.
-let datasetInfo = { datasets: [], tags_by_dataset: {}, all_tags: [], has_current: false };
+let datasetInfo = { datasets: [], tags_by_dataset: {}, all_tag_groups: {}, has_current: false };
 
 // Values of the currently ticked dataset checkboxes.
 function checkedDatasets() {
@@ -849,26 +978,21 @@ function passesFilter(tags) {
 
 async function refreshDatasets(announce = false) {
   const dir = $("folder").value.trim();
-  let info = { datasets: [], tags_by_dataset: {}, all_tags: [], has_current: false };
+  let info = { datasets: [], tags_by_dataset: {}, all_tag_groups: {}, has_current: false };
   try {
     info = await (await fetch("api/datasets?dir=" + encodeURIComponent(dir))).json();
   } catch (_) {}
   datasetInfo = info;
 
-  // Rebuild the filter-tag checklist from the union of tags across datasets,
-  // keeping any filter tags already ticked.
+  // Rebuild the filter-tag checklist: one box per section (tags not in the
+  // YAML come back from the server under an "other" section), keeping any
+  // filter tags already ticked.
   const tf = $("tagfilter");
   const prevFilter = new Set(filterTags());
-  tf.innerHTML = "";
-  for (const name of (info.all_tags || [])) {
-    const lab = document.createElement("label");
-    const cb = document.createElement("input");
-    cb.type = "checkbox"; cb.value = name; cb.checked = prevFilter.has(name);
-    lab.appendChild(cb);
-    lab.appendChild(document.createTextNode(name));
-    tf.appendChild(lab);
-  }
-  if (!tf.children.length) {
+  const count = renderTagBoxes(tf, info.all_tag_groups || {},
+    (_section, name) => prevFilter.has(name));
+  if (!count) {
+    tf.innerHTML = "";
     const span = document.createElement("span");
     span.className = "empty"; span.textContent = "No tags on these datasets.";
     tf.appendChild(span);
@@ -1197,7 +1321,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/status":
             self._json(STATE.snapshot())
         elif path == "/api/tags":
-            self._json({"tags": lcr.load_tags()})
+            self._json({"groups": lcr.load_tag_groups()})
         elif path == "/api/plot":
             with STATE.lock:
                 plot = STATE.plot
@@ -1207,12 +1331,18 @@ class Handler(BaseHTTPRequestHandler):
             with STATE.lock:
                 has_current = STATE.plot is not None
             base = dataset_dir(folder)
-            by_tag = datasets_with_tags(folder)
-            all_tags = sorted({t for ts in by_tag.values() for t in ts}, key=str.lower)
+            by_groups = datasets_with_tag_groups(folder)
+            # Flat tags per dataset for the filter match + the per-row "(...)" note.
+            tags_by_dataset = {
+                n: [t for ts in g.values() for t in ts] for n, g in by_groups.items()
+            }
+            # Filter checklist grouped by the YAML's sections; tags not in the
+            # YAML land in the "other" section.
+            all_tag_groups = filter_tag_groups(folder)
             self._json({
-                "datasets": list(by_tag),
-                "tags_by_dataset": by_tag,
-                "all_tags": all_tags,
+                "datasets": list(by_groups),
+                "tags_by_dataset": tags_by_dataset,
+                "all_tag_groups": all_tag_groups,
                 "has_current": has_current,
                 "dir": str(base),
                 "exists": base.is_dir(),
@@ -1239,7 +1369,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(start_sweep(self._read_body()))
         elif path == "/api/tags":
             body = self._read_body()
-            self._json({"tags": lcr.add_tag(str(body.get("tag", "")))})
+            section = str(body.get("section", "") or lcr.TAG_SECTIONS[0])
+            self._json({"groups": lcr.add_tag(str(body.get("tag", "")), section)})
         elif path == "/api/cancel":
             if STATE.is_running():
                 STATE.stop_event.set()

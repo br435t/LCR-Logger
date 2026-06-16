@@ -1,13 +1,15 @@
-# LCR Logger measurement tags -- one per line as a YAML list.
-# Edit by hand or add new tags from the GUI/CLI before a sweep.
+# LCR Logger measurement tags, grouped into sections.
+# Add tags under either section as "- value" lines (GUI/CLI or by hand).
 
-- short
-- long
-- plated
-- unplated
-- 1pair
-- 2pair
-- 3pair
-- 4pair
-- 5pair
+test_parameters:
+  - short
+  - long
+  - plated
+  - unplated
 
+test_configurations:
+  - 1pair
+  - 2pair
+  - 3pair
+  - 4pair
+  - 5pair
