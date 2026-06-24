@@ -41,6 +41,13 @@ Or look it up manually:
 
 ### 3. Python environment
 
+**One-click setup (recommended).** From the project folder, run the installer for your OS. It creates a `.venv` and installs the pinned dependencies — re-run it any time; it reuses an existing `.venv`.
+
+- **Windows:** double-click **`install.bat`** (or run it in a terminal).
+- **Linux / macOS:** `./install.sh` (or `bash install.sh`).
+
+**Manual setup** (equivalent to what the scripts do):
+
 ```powershell
 # Windows
 python -m venv .venv
@@ -54,6 +61,8 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+> If `pip install` fails behind a corporate proxy that does SSL inspection, pip needs your organisation's root CA. See HANDOFF.md "Environment quirks".
 
 ## Usage
 
@@ -91,7 +100,9 @@ All console output is also appended to `LCR_logging.log` in the working director
 
 ## GUI
 
-For a point-and-click alternative to the sweep CLI, run:
+For a point-and-click alternative to the sweep CLI, launch the GUI with the helper script — **`run_gui.bat`** (Windows, double-click) or **`./run_gui.sh`** (Linux / macOS). These use the `.venv` created by the installer above; run the installer first.
+
+Equivalently, with the environment activated:
 
 ```sh
 python LCR_gui.py
@@ -129,6 +140,8 @@ The full SCPI reference is in `894_895_programming_manual.pdf`.
 |---|---|
 | `LCR_logging.py` | The CLI script + reusable instrument helpers |
 | `LCR_gui.py` | Optional browser-based GUI (stdlib `http.server`) for sweep + save |
+| `install.bat` / `install.sh` | One-click `.venv` setup + dependency install (Windows / Linux-macOS) |
+| `run_gui.bat` / `run_gui.sh` | One-click GUI launcher using `.venv` (Windows / Linux-macOS) |
 | `requirements.txt` | Pinned Python dependencies |
 | `894_895_programming_manual.pdf` | Vendor SCPI command reference |
 | `data/` | Sweep results (created on first save) |
