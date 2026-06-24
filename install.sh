@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  LCR Logger - one-click environment setup (Linux/macOS)
-#  Run:  ./install.sh   (or: bash install.sh)
+#  Run:  install.sh   (or: bash install.sh)
 #  Creates a .venv next to this script and installs the
 #  dependencies listed in requirements.txt.
 # ============================================================

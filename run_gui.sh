@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  LCR Logger - launch the GUI (Linux/macOS).
-#  Run:  ./run_gui.sh   (or: bash run_gui.sh)
+#  Run:  run_gui.sh   (or: bash run_gui.sh)
 #  Uses the .venv created by install.sh.
 # ============================================================
 
