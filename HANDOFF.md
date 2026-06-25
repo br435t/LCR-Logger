@@ -11,6 +11,8 @@ A Python tool for streaming and logging measurements from a **B&K Precision 894*
 
 CLI: [`LCR_logging.py`](LCR_logging.py) — also exposes reusable helpers (`get_serial_ports`, `collect_sweep`, `save_sweep`, etc.). GUI: [`LCR_gui.py`](LCR_gui.py), a browser-based front end (stdlib `http.server`, served on `127.0.0.1`) for the sweep + save flow that drives those same helpers. See [`README.md`](README.md) for setup and [`894_895_programming_manual.pdf`](894_895_programming_manual.pdf) for the SCPI reference.
 
+For non-technical users on Windows there are now double-click launchers: [`install.bat`](install.bat) (creates `.venv`, installs `requirements.txt`) and [`run_gui.bat`](run_gui.bat) (launches the GUI from that venv). POSIX equivalents [`install.sh`](install.sh) / [`run_gui.sh`](run_gui.sh) exist too.
+
 ## Hardware status
 
 **Confirmed working over serial on Windows (2026-06-11).** The script connects to the meter and streams measurements. The earlier "never been connected" risk is resolved.
@@ -26,9 +28,11 @@ If `*IDN?` returns nothing: re-check the meter's USB mode (must be USBCDC) and t
 
 ## Recent history (working backwards)
 
-1. **Refactored transport from USBTMC to serial (pyserial).** Reason: the host machine has no admin rights, so the Zadig driver swap that USBTMC needs on Windows isn't possible. The serial path uses only stock OS drivers. Both USB-CDC and RS-232 are supported. Same SCPI commands, just different transport.
-2. **Cross-referenced the code against `894_895_programming_manual.pdf`.** Found several issues — see "Known limitations" below.
-3. **Initial USBTMC implementation** worked on paper but was never tested against hardware.
+1. **One-click install + launch.** Added `install.bat`/`install.sh` and `run_gui.bat`/`run_gui.sh` so a non-technical user can set up the venv and start the GUI by double-clicking. README rewritten around this flow.
+2. **GUI feature additions.** Measurement **tags** (driven by [`tags.yaml`](tags.yaml) — two sections, `test_parameters` and `test_configurations`, with in-UI tag filters), a measurement **range** control, **units** added to the JSON sweep output, and a **file save-over** fix (no longer silently clobbering existing results).
+3. **Refactored transport from USBTMC to serial (pyserial).** Reason: the host machine has no admin rights, so the Zadig driver swap that USBTMC needs on Windows isn't possible. The serial path uses only stock OS drivers. Both USB-CDC and RS-232 are supported. Same SCPI commands, just different transport.
+4. **Cross-referenced the code against `894_895_programming_manual.pdf`.** Found several issues — see "Known limitations" below.
+5. **Initial USBTMC implementation** worked on paper but was never tested against hardware.
 
 ## Environment quirks
 
@@ -50,15 +54,15 @@ If/when the meter is connected and #1 turns out to be a real problem, the fix is
 
 ## Repo / branch state
 
-GitHub: `https://github.com/bnt1002/LCR-Logger` (private).
+GitHub: `https://github.com/br435t/LCR-Logger` (private).
 
 Branches:
 
-- `Front-End` — **current working branch.** Holds everything: the serial refactor, the `TRIG:SOUR BUS` fix, the RS-232C / USBCDC interface-selection docs, the CSV/JSON output, example data, this handoff doc, and the README. ~17 commits ahead of `main`.
-- `main` — **behind.** Has not yet received the serial refactor (tip is "Add numpy to requirements.txt"). Bring it up to date by merging `Front-End` into it when the work is ready to land.
-- `Windows`, `driver-change-windows` — superseded snapshots, both fully merged into `Front-End`. Safe to delete locally and on origin once you're confident nothing on them is needed.
+- `main` — **current working branch.** The `Front-End` work has been merged in, and `main` has since moved ahead with the one-click installers, the GUI tag/range/units/save-over changes, and the README rewrite. This is where active work happens now.
+- `Front-End` — **behind `main`** (fully merged into it; tip is "update readme" minus the recent main-only commits). Effectively a historical branch now; safe to delete or leave as-is.
+- `Windows`, `driver-change-windows`, `stale/driver-change-windows` — superseded snapshots, all fully merged. Safe to delete locally and on origin once you're confident nothing on them is needed.
 
-If you continue this work, `git checkout Front-End` and go.
+If you continue this work, you're already on `main` — just go.
 
 ## Things explicitly *not* done
 
@@ -71,12 +75,15 @@ If you continue this work, `git checkout Front-End` and go.
 
 ## Files
 
-All tracked status below is for the `Front-End` branch.
+All tracked status below is for the `main` branch.
 
 | File | What it is | Tracked? |
 |---|---|---|
 | `LCR_logging.py` | The CLI script (serial version) + reusable instrument helpers | Yes |
 | `LCR_gui.py` | Browser-based GUI front end (stdlib `http.server`) for the sweep + save flow | Yes |
+| `tags.yaml` | Measurement-tag list (`test_parameters`, `test_configurations`) the GUI reads/writes | Yes |
+| `install.bat` / `install.sh` | One-click venv setup + `pip install -r requirements.txt` | Yes |
+| `run_gui.bat` / `run_gui.sh` | One-click GUI launch from the `.venv` | Yes |
 | `requirements.txt` | Pinned deps: `numpy`, `pyserial` | Yes |
 | `README.md` | User-facing setup + usage | Yes |
 | `HANDOFF.md` | This file | Yes |
@@ -89,6 +96,6 @@ All tracked status below is for the `Front-End` branch.
 
 ## How to pick up
 
-If you're a future Claude session: read this file, `README.md`, and the top docstring of `LCR_logging.py`. Then `git status` and `git log --oneline -10 --all` to see the branch situation. The Claude memory at `~/.claude/projects/c--Code-LCR-Logger/memory/` has the corporate SSL context.
+If you're a future Claude session: read this file, `README.md`, and the top docstring of `LCR_logging.py`. Then `git status` and `git log --oneline -10 --all` to see the branch situation (active branch is `main`). The Claude memory at `~/.claude/projects/c--Code-LCR-Logger/memory/` has the corporate SSL context.
 
 If you're a human teammate: clone the repo, follow `README.md` setup, ask the project owner to add you as a collaborator on GitHub. The meter is on-site — first job is to actually run the script against it and resolve issue #1 if it bites.
