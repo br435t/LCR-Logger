@@ -533,18 +533,17 @@ PAGE = """<!doctype html>
     </div>
     <button id="addtag" type="button">Add</button>
   </div>
+  <div class="controls">
+    <button id="run" type="button">Run sweep &amp; save</button>
+    <button id="cancel" type="button" disabled>Cancel</button>
+    <progress id="bar" value="0" max="1"></progress>
+  </div>
 </fieldset>
 
 <fieldset>
   <legend>JSON metadata preview</legend>
   <pre id="preview"></pre>
 </fieldset>
-
-<div class="controls">
-  <button id="run" type="button">Run sweep &amp; save</button>
-  <button id="cancel" type="button" disabled>Cancel</button>
-  <progress id="bar" value="0" max="1"></progress>
-</div>
 
 <fieldset>
   <legend>Progress</legend>
@@ -1185,6 +1184,19 @@ function drawPlot() {
     ctx.beginPath(); ctx.moveTo(R, py); ctx.lineTo(R - 4, py); ctx.stroke();
   }
   ctx.globalAlpha = 1;
+
+  // Pronounced zero baseline: when y=0 is in view on a linear axis, draw it
+  // darker/thicker than the faint gridlines so the sign of the data reads at a
+  // glance. Skipped on a log axis, where 0 can't be plotted.
+  if (!ylog && ymn < 0 && ymx > 0) {
+    const pz = sy(0);
+    ctx.save();
+    ctx.strokeStyle = ink; ctx.lineWidth = 2; ctx.globalAlpha = .55;
+    ctx.beginPath(); ctx.moveTo(L, pz); ctx.lineTo(R, pz); ctx.stroke();
+    ctx.fillStyle = ink; ctx.globalAlpha = .9; ctx.textAlign = "right";
+    ctx.fillText("0", L - 6, pz);
+    ctx.restore();
+  }
 
   // Frame + axis titles.
   ctx.globalAlpha = .5; ctx.strokeRect(L, T, R - L, B - T); ctx.globalAlpha = 1;
